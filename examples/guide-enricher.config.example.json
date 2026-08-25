@@ -1,0 +1,21 @@
+{
+  "country": "US",
+  "cache_ttl_seconds": 604800,
+  "prefer_iptv_org_logo_for_match_types": ["alias", "callsign"],
+  "paths": {
+    "m3u": "/path/to/threadfin/provider.m3u",
+    "source_xmltv": "/path/to/source-guide.xml",
+    "output_xmltv": "/path/to/threadfin/provider.xml",
+    "iptv_org_cache": "/path/to/cache/iptv-org-cache.json"
+  },
+  "notes": {
+    "source_xmltv": "Download or export XMLTV from a provider such as EPG.best, Schedules Direct, or your IPTV provider before running this tool.",
+    "secrets": "Do not commit tokenized provider URLs, account credentials, or Plex tokens."
+  },
+  "iptv_org_channel_aliases": {
+    "Example Regional Sports Channel": "FanDuelSportsNetworkSouthwestDallasFortWorth.us"
+  },
+  "xmltv_channel_map": {
+    "Example Channel Name From M3U": "source-xmltv-channel-id"
+  }
+}
