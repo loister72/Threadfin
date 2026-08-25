@@ -1998,8 +1998,6 @@ func getStreamByChannelID(channelID string) (playlistID, streamURL string, err e
 		var xepgChannel XEPGChannelStruct
 		err := json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
 
-		fmt.Println(xepgChannel.XChannelID)
-
 		if err == nil {
 
 			if xepgChannel.TvgName == "" {

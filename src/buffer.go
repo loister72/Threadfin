@@ -1261,7 +1261,12 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 
 		f, err = bufferVFS.OpenFile(tmpFile, os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
-			panic(err)
+			cmd.Process.Kill()
+			ShowError(err, 0)
+			killClientConnection(streamID, playlistID, false)
+			addErrorToStream(err)
+			cmd.Wait()
+			return
 		}
 		defer f.Close()
 
@@ -1366,6 +1371,10 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 				_, errCreate = bufferVFS.Create(tmpFile)
 				f, errOpen = bufferVFS.OpenFile(tmpFile, os.O_APPEND|os.O_WRONLY, 0600)
 				if errCreate != nil || errOpen != nil {
+					err = errCreate
+					if err == nil {
+						err = errOpen
+					}
 					cmd.Process.Kill()
 					ShowError(err, 0)
 					killClientConnection(streamID, playlistID, false)

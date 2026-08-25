@@ -225,7 +225,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 // Auto : HDHR routing (wird derzeit nicht benutzt)
 func Auto(w http.ResponseWriter, r *http.Request) {
 	var channelID = strings.Replace(r.RequestURI, "/auto/v", "", 1)
-	fmt.Println(channelID)
+	showDebug("Auto channel: "+channelID, 1)
 	return
 }
 
@@ -624,7 +624,7 @@ func WS(w http.ResponseWriter, r *http.Request) {
 			response.ProbeInfo = ProbeInfoStruct{Resolution: resolution, FrameRate: frameRate, AudioChannel: audioChannels}
 
 		default:
-			fmt.Println("+ + + + + + + + + + +", request.Cmd)
+			showDebug("Unknown websocket command: "+request.Cmd, 1)
 		}
 
 		if err != nil {
@@ -955,7 +955,6 @@ func API(w http.ResponseWriter, r *http.Request) {
 
 		default:
 			token, err = tokenAuthentication(request.Token)
-			fmt.Println(err)
 			if err != nil {
 				responseAPIError(err)
 				return
