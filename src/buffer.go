@@ -1045,19 +1045,19 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 					if stream.BackupChannel1 != nil {
 						url = stream.BackupChannel1.URL
 						showHighlight("START OF BACKUP 1 STREAM")
-						showInfo("Backup Channel 1 URL: " + url)
+						showInfo("Backup Channel 1 URL: " + redactStreamURL(url))
 					}
 				case 2:
 					if stream.BackupChannel2 != nil {
 						url = stream.BackupChannel2.URL
 						showHighlight("START OF BACKUP 2 STREAM")
-						showInfo("Backup Channel 2 URL: " + url)
+						showInfo("Backup Channel 2 URL: " + redactStreamURL(url))
 					}
 				case 3:
 					if stream.BackupChannel3 != nil {
 						url = stream.BackupChannel3.URL
 						showHighlight("START OF BACKUP 3 STREAM")
-						showInfo("Backup Channel 3 URL: " + url)
+						showInfo("Backup Channel 3 URL: " + redactStreamURL(url))
 					}
 				}
 			}
@@ -1134,7 +1134,20 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 		var tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
 
 		f, err := bufferVFS.Create(tmpFile)
+		if err != nil {
+			ShowError(err, 0)
+			killClientConnection(streamID, playlistID, false)
+			addErrorToStream(err)
+			return
+		}
 		f.Close()
+
+		//args = strings.Replace(args, "[USER-AGENT]", Settings.UserAgent, -1)
+
+		// Set User-Agent
+		var args []string
+
+		parsedOptions, err := splitCommandLine(options)
 		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
@@ -1142,12 +1155,7 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 			return
 		}
 
-		//args = strings.Replace(args, "[USER-AGENT]", Settings.UserAgent, -1)
-
-		// Set User-Agent
-		var args []string
-
-		for i, a := range strings.Split(options, " ") {
+		for i, a := range parsedOptions {
 
 			switch bufferType {
 			case "FFMPEG":

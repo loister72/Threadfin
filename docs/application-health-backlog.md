@@ -9,6 +9,10 @@ This backlog tracks production-readiness work for the Threadfin fork. The focus 
 - Replace raw process kills with a single helper that checks for nil process handles, kills only when running, waits once, and records the reason.
 - Audit buffer timeout behavior. The current third-party buffer timeout is hardcoded around loop counts and should be tied to `buffer.timeout`.
 - Add regression coverage for provider EOF after first segment, zero-byte reads, missing temp files, and backup-stream failover.
+- Split stream delivery into explicit Direct, Remux, and Transcode profiles. `ffmpeg-remux` should become the Plex IPTV default after smoke tests prove the structured profile in `docs/stream-engine-architecture.md`.
+- Replace opaque third-party command strings with structured argument builders while preserving an advanced override path.
+- Add a supervised process helper for FFmpeg/VLC with context cancellation, process-group cleanup, stderr ring buffer, and redacted diagnostics.
+- Evaluate replacing the third-party `.ts` chunk handoff with a direct response stream or tested ring buffer to reduce post-start buffering.
 
 ## P1 - Guide And Logo Correctness
 
