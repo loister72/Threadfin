@@ -199,6 +199,13 @@ func TestThirdPartySegmentWriterRotatesSegments(t *testing.T) {
 	}
 }
 
+func TestThirdPartySegmentRotateSizeIsCapped(t *testing.T) {
+	got := thirdPartySegmentRotateSize(2 * 1024 * 1024)
+	if got != maxThirdPartySegmentSize {
+		t.Fatalf("thirdPartySegmentRotateSize = %d, want %d", got, maxThirdPartySegmentSize)
+	}
+}
+
 func readBufferVFSTestFile(filename string) ([]byte, error) {
 	f, err := bufferVFS.Open(filename)
 	if err != nil {
