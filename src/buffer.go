@@ -136,22 +136,36 @@ func createStreamID(stream map[int]ThisStream, ip, userAgent string) (streamID i
 	return
 }
 
-func bufferingStream(playlistID string, streamingURL string, backupStream1 *BackupStream, backupStream2 *BackupStream, backupStream3 *BackupStream, channelName string, w http.ResponseWriter, r *http.Request) {
+func redactStreamURL(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
 
-	time.Sleep(time.Duration(Settings.BufferTimeout) * time.Millisecond)
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<redacted>"
+	}
+
+	u.RawQuery = ""
+	u.User = nil
+
+	return u.String()
+}
+
+func bufferingStream(playlistID string, streamingURL string, backupStream1 *BackupStream, backupStream2 *BackupStream, backupStream3 *BackupStream, channelName string, w http.ResponseWriter, r *http.Request) {
 
 	var playlist Playlist
 	var client ThisClient
 	var stream ThisStream
-	var streaming = false
 	var streamID int
 	var debug string
 	var timeOut = 0
 	var newStream = true
 
-	//w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Connection", "close")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	// Check whether the playlist is already in use
 	Lock.Lock()
@@ -215,6 +229,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 		client.Connection += 1
 
 		stream.URL = streamingURL
+		stream.ClientID = fmt.Sprintf("%s-%s", getClientIP(r), r.UserAgent())
 		stream.BackupChannel1 = backupStream1
 		stream.BackupChannel2 = backupStream2
 		stream.BackupChannel3 = backupStream3
@@ -297,13 +312,15 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 					content := GetHTMLString(value.(string))
 
-					w.WriteHeader(200)
 					w.Header().Set("Content-type", "video/mpeg")
-					w.Header().Set("Content-Length:", "0")
+					w.WriteHeader(200)
 
 					for i := 1; i < 60; i++ {
 						_ = i
 						w.Write([]byte(content))
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
+						}
 						time.Sleep(time.Duration(500) * time.Millisecond)
 					}
 
@@ -322,6 +339,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 			client.Connection = 1
 			stream.URL = streamingURL
+			stream.ClientID = fmt.Sprintf("%s-%s", getClientIP(r), r.UserAgent())
 			stream.ChannelName = channelName
 			stream.Status = false
 			stream.BackupChannel1 = backupStream1
@@ -376,6 +394,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 	}
 
+	w.Header().Set("Content-type", "video/mp2t")
 	w.WriteHeader(200)
 
 	for { //Loop 1: Wait until the first segment has been downloaded through the buffer
@@ -483,24 +502,6 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 									file.Seek(0, 0)
 
-									if !streaming {
-
-										contentType := http.DetectContentType(buffer)
-										_ = contentType
-										//w.Header().Set("Content-type", "video/mpeg")
-										w.Header().Set("Content-type", contentType)
-										w.Header().Set("Content-Length", "0")
-										w.Header().Set("Connection", "close")
-
-									}
-
-									/*
-									   // HDHR Header
-									   w.Header().Set("Cache-Control", "no-cache")
-									   w.Header().Set("Pragma", "no-cache")
-									   w.Header().Set("transferMode.dlna.org", "Streaming")
-									*/
-
 									_, err := w.Write(buffer)
 
 									if err != nil {
@@ -509,8 +510,11 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 										return
 									}
 
+									if flusher, ok := w.(http.Flusher); ok {
+										flusher.Flush()
+									}
+
 									file.Close()
-									streaming = true
 
 								}
 
@@ -1125,7 +1129,7 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 		}
 
 		showInfo(fmt.Sprintf("%s path:%s", bufferType, path))
-		showInfo("Streaming URL:" + url)
+		showInfo("Streaming URL:" + redactStreamURL(url))
 
 		var tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
 
@@ -1225,8 +1229,12 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 			showInfo(bufferType + ":Processing data")
 		}
 
-		cmd.Start()
-		defer cmd.Wait()
+		if err := cmd.Start(); err != nil {
+			ShowError(err, 0)
+			killClientConnection(streamID, playlistID, false)
+			addErrorToStream(err)
+			return
+		}
 
 		go func() {
 

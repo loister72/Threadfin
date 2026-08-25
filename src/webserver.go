@@ -134,11 +134,11 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 
 	systemMutex.Lock()
 	forceHttps := Settings.ForceHttps
-    noStreamHttps := Settings.ExcludeStreamHttps
+	noStreamHttps := Settings.ExcludeStreamHttps
 	systemMutex.Unlock()
 
 	// Dont Change Source M3Us to use HTTPs when forceHttps set and Exclude Streams from https
-    if forceHttps && noStreamHttps == false {
+	if forceHttps && noStreamHttps == false {
 		u, err := url.Parse(streamInfo.URL)
 		if err == nil {
 			u.Scheme = "https"
@@ -197,7 +197,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 		if strings.Index(streamInfo.URL, "rtsp://") != -1 || strings.Index(streamInfo.URL, "rtp://") != -1 {
 			err = errors.New("RTSP and RTP streams are not supported")
 			ShowError(err, 2004)
-			showInfo("Streaming URL:" + streamInfo.URL)
+			showInfo("Streaming URL:" + redactStreamURL(streamInfo.URL))
 			http.Redirect(w, r, streamInfo.URL, 302)
 			return
 		}
@@ -211,7 +211,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 
 	switch playListBuffer {
 	case "-":
-		showInfo("Streaming URL:" + streamInfo.URL)
+		showInfo("Streaming URL:" + redactStreamURL(streamInfo.URL))
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		http.Redirect(w, r, streamInfo.URL, 302)
 		showInfo("Streaming Info:URL was passed to the client.")
