@@ -43,7 +43,7 @@ while [ $(( $(date +%s) - start )) -lt 60 ]; do
     continue
   fi
 
-  seg=$(awk '!/^#/ && NF {x=$0} END{print x}' /tmp/plex_live_index.m3u8)
+  seg=$(awk '!/^#/ && NF {x=$0} END{gsub(/\r$/, "", x); print x}' /tmp/plex_live_index.m3u8)
   if [ -n "$seg" ] && [ "$seg" != "$last" ]; then
     case "$seg" in
       http://*|https://*) url="$seg" ;;
