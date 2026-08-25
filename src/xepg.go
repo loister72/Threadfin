@@ -41,6 +41,26 @@ func checkXMLCompatibility(id string, body []byte) (err error) {
 	return
 }
 
+func getFilterStructs() []FilterStruct {
+	filters := make([]FilterStruct, 0, len(Settings.Filter))
+
+	for _, filter := range Settings.Filter {
+		filterJSON, err := json.Marshal(filter)
+		if err != nil {
+			continue
+		}
+
+		var f FilterStruct
+		if err := json.Unmarshal(filterJSON, &f); err != nil {
+			continue
+		}
+
+		filters = append(filters, f)
+	}
+
+	return filters
+}
+
 var buildXEPGCount int
 
 // XEPG Daten erstellen
@@ -337,6 +357,7 @@ func createXEPGMapping() {
 func createXEPGDatabase() (err error) {
 
 	var allChannelNumbers = make([]float64, 0, System.UnfilteredChannelLimit)
+	var filters []FilterStruct
 	Data.Cache.Streams.Active = make([]string, 0, System.UnfilteredChannelLimit)
 	Data.XEPG.Channels = make(map[string]interface{}, System.UnfilteredChannelLimit)
 
@@ -358,6 +379,7 @@ func createXEPGDatabase() (err error) {
 	}
 	settings_json, _ := json.Marshal(settings)
 	json.Unmarshal(settings_json, &Settings)
+	filters = getFilterStructs()
 
 	// Remove duplicate channels from existing XEPG database based on new hash logic
 	removeDuplicateChannels()
@@ -622,14 +644,6 @@ func createXEPGDatabase() (err error) {
 			// Neuer Kanal
 			var firstFreeNumber float64 = Settings.MappingFirstChannel
 			// Check channel start number from Group Filter
-			filters := []FilterStruct{}
-			for _, filter := range Settings.Filter {
-				filter_json, _ := json.Marshal(filter)
-				f := FilterStruct{}
-				json.Unmarshal(filter_json, &f)
-				filters = append(filters, f)
-			}
-
 			for _, filter := range filters {
 				if m3uChannel.GroupTitle == filter.Filter {
 					start_num, _ := strconv.ParseFloat(filter.StartingNumber, 64)
@@ -665,13 +679,6 @@ func createXEPGDatabase() (err error) {
 					continue
 				}
 				if channel, ok := channelsMap[m3uChannel.TvgID]; ok {
-					filters := []FilterStruct{}
-					for _, filter := range Settings.Filter {
-						filter_json, _ := json.Marshal(filter)
-						f := FilterStruct{}
-						json.Unmarshal(filter_json, &f)
-						filters = append(filters, f)
-					}
 					for _, filter := range filters {
 						if newChannel.GroupTitle == filter.Filter {
 							category := &Category{}
@@ -753,6 +760,7 @@ func createXEPGDatabase() (err error) {
 // Kanäle automatisch zuordnen und das Mapping überprüfen
 func mapping() (err error) {
 	showInfo("XEPG:" + "Map channels")
+	filters := getFilterStructs()
 
 	for xepg, dxc := range Data.XEPG.Channels {
 
@@ -814,13 +822,6 @@ func mapping() (err error) {
 					}
 					if channel, ok := channelsMap[tvgID]; ok {
 
-						filters := []FilterStruct{}
-						for _, filter := range Settings.Filter {
-							filter_json, _ := json.Marshal(filter)
-							f := FilterStruct{}
-							json.Unmarshal(filter_json, &f)
-							filters = append(filters, f)
-						}
 						for _, filter := range filters {
 							if xepgChannel.GroupTitle == filter.Filter {
 								category := &Category{}
@@ -869,13 +870,6 @@ func mapping() (err error) {
 
 					if channel, ok := value[mapping].(map[string]interface{}); ok {
 
-						filters := []FilterStruct{}
-						for _, filter := range Settings.Filter {
-							filter_json, _ := json.Marshal(filter)
-							f := FilterStruct{}
-							json.Unmarshal(filter_json, &f)
-							filters = append(filters, f)
-						}
 						for _, filter := range filters {
 							if xepgChannel.GroupTitle == filter.Filter {
 								category := &Category{}
@@ -903,13 +897,6 @@ func mapping() (err error) {
 
 			} else {
 				// Loop through dummy channels and assign the filter info
-				filters := []FilterStruct{}
-				for _, filter := range Settings.Filter {
-					filter_json, _ := json.Marshal(filter)
-					f := FilterStruct{}
-					json.Unmarshal(filter_json, &f)
-					filters = append(filters, f)
-				}
 				for _, filter := range filters {
 					if xepgChannel.GroupTitle == filter.Filter {
 						category := &Category{}
@@ -1106,6 +1093,7 @@ func getProgramData(xepgChannel XEPGChannelStruct) (xepgXML XMLTV, err error) {
 	var channelID = xepgChannel.XMapping
 
 	var xmltv XMLTV
+	filters := getFilterStructs()
 
 	if strings.Contains(xmltvFile, "Threadfin Dummy") {
 		xmltv = createDummyProgram(xepgChannel)
@@ -1138,14 +1126,6 @@ func getProgramData(xepgChannel XEPGChannelStruct) (xepgXML XMLTV, err error) {
 					}, xmltvProgram.Title[0].Value))
 				}
 				program.Title = xmltvProgram.Title
-			}
-
-			filters := []FilterStruct{}
-			for _, filter := range Settings.Filter {
-				filter_json, _ := json.Marshal(filter)
-				f := FilterStruct{}
-				json.Unmarshal(filter_json, &f)
-				filters = append(filters, f)
 			}
 
 			// Category (Kategorie)
