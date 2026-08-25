@@ -61,6 +61,25 @@ func getFilterStructs() []FilterStruct {
 	return filters
 }
 
+func getActiveStreamsByTvgName() (map[string]M3UChannelStructXEPG, error) {
+	streamsByTvgName := make(map[string]M3UChannelStructXEPG, len(Data.Streams.Active))
+
+	for _, stream := range Data.Streams.Active {
+		var m3uChannel M3UChannelStructXEPG
+		if err := remarshalJSON(stream, &m3uChannel); err != nil {
+			return nil, err
+		}
+
+		if m3uChannel.TvgName == "" {
+			m3uChannel.TvgName = m3uChannel.Name
+		}
+
+		streamsByTvgName[m3uChannel.TvgName] = m3uChannel
+	}
+
+	return streamsByTvgName, nil
+}
+
 var buildXEPGCount int
 
 // XEPG Daten erstellen
@@ -388,7 +407,7 @@ func createXEPGDatabase() (err error) {
 	m3uChannels := make(map[string]M3UChannelStructXEPG)
 	for _, dsa := range Data.Streams.Active {
 		var m3uChannel M3UChannelStructXEPG
-		err = json.Unmarshal([]byte(mapToJSON(dsa)), &m3uChannel)
+		err = remarshalJSON(dsa, &m3uChannel)
 		if err == nil {
 			// Use tvg-id as the key for matching channels
 			key := m3uChannel.TvgID
@@ -402,7 +421,7 @@ func createXEPGDatabase() (err error) {
 	// Update URLs in XEPG database
 	for id, dxc := range Data.XEPG.Channels {
 		var xepgChannel XEPGChannelStruct
-		err = json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err = remarshalJSON(dxc, &xepgChannel)
 		if err == nil {
 			// Find matching M3U channel using tvg-id or tvg-name
 			key := xepgChannel.TvgID
@@ -417,13 +436,6 @@ func createXEPGDatabase() (err error) {
 				}
 			}
 		}
-	}
-
-	// Save updated XEPG database
-	err = saveMapToJSONFile(System.File.XEPG, Data.XEPG.Channels)
-	if err != nil {
-		ShowError(err, 000)
-		return err
 	}
 
 	var createNewID = func() (xepg string) {
@@ -464,7 +476,7 @@ func createXEPGDatabase() (err error) {
 	for id, dxc := range Data.XEPG.Channels {
 
 		var xepgChannel XEPGChannelStruct
-		err = json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err = remarshalJSON(dxc, &xepgChannel)
 		if err != nil {
 			return
 		}
@@ -481,9 +493,10 @@ func createXEPGDatabase() (err error) {
 
 	// Make a map of the db channels based on their previously downloaded attributes -- filename, group, title, etc
 	var xepgChannelsValuesMap = make(map[string]XEPGChannelStruct, System.UnfilteredChannelLimit)
+	var xepgChannelsByFileID = make(map[string][]XEPGChannelStruct, System.UnfilteredChannelLimit)
 	for _, v := range Data.XEPG.Channels {
 		var channel XEPGChannelStruct
-		err = json.Unmarshal([]byte(mapToJSON(v)), &channel)
+		err = remarshalJSON(v, &channel)
 		if err != nil {
 			return
 		}
@@ -505,6 +518,7 @@ func createXEPGDatabase() (err error) {
 		hash := md5.Sum([]byte(hashInput))
 		channelHash := hex.EncodeToString(hash[:])
 		xepgChannelsValuesMap[channelHash] = channel
+		xepgChannelsByFileID[channel.FileM3UID] = append(xepgChannelsByFileID[channel.FileM3UID], channel)
 	}
 
 	for _, dsa := range Data.Streams.Active {
@@ -514,7 +528,7 @@ func createXEPGDatabase() (err error) {
 
 		var m3uChannel M3UChannelStructXEPG
 
-		err = json.Unmarshal([]byte(mapToJSON(dsa)), &m3uChannel)
+		err = remarshalJSON(dsa, &m3uChannel)
 		if err != nil {
 			return
 		}
@@ -546,9 +560,9 @@ func createXEPGDatabase() (err error) {
 				channelHasUUID = true
 			}
 		} else {
-			// XEPG Datenbank durchlaufen um nach dem Kanal zu suchen.  Run through the XEPG database to search for the channel (full scan)
-			for _, dxc := range xepgChannelsValuesMap {
-				if m3uChannel.FileM3UID == dxc.FileM3UID && !isInInactiveList(dxc.URL) {
+			// Search only channels from the same source instead of scanning the full XEPG database.
+			for _, dxc := range xepgChannelsByFileID[m3uChannel.FileM3UID] {
+				if !isInInactiveList(dxc.URL) {
 
 					dxc.FileM3UID = m3uChannel.FileM3UID
 					dxc.FileM3UName = m3uChannel.FileM3UName
@@ -574,7 +588,7 @@ func createXEPGDatabase() (err error) {
 		case true:
 			// Bereits vorhandener Kanal
 			var xepgChannel XEPGChannelStruct
-			err = json.Unmarshal([]byte(mapToJSON(Data.XEPG.Channels[currentXEPGID])), &xepgChannel)
+			err = remarshalJSON(Data.XEPG.Channels[currentXEPGID], &xepgChannel)
 			if err != nil {
 				return
 			}
@@ -743,6 +757,7 @@ func createXEPGDatabase() (err error) {
 			newChannel.ChannelUniqueID = m3uChannelHash
 			Data.XEPG.Channels[xepg] = newChannel
 			xepgChannelsValuesMap[m3uChannelHash] = newChannel
+			xepgChannelsByFileID[newChannel.FileM3UID] = append(xepgChannelsByFileID[newChannel.FileM3UID], newChannel)
 
 		}
 	}
@@ -761,11 +776,15 @@ func createXEPGDatabase() (err error) {
 func mapping() (err error) {
 	showInfo("XEPG:" + "Map channels")
 	filters := getFilterStructs()
+	activeStreamsByTvgName, err := getActiveStreamsByTvgName()
+	if err != nil {
+		return err
+	}
 
 	for xepg, dxc := range Data.XEPG.Channels {
 
 		var xepgChannel XEPGChannelStruct
-		err = json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err = remarshalJSON(dxc, &xepgChannel)
 		if err != nil {
 			return
 		}
@@ -775,32 +794,19 @@ func mapping() (err error) {
 		}
 
 		if (xepgChannel.XBackupChannel1 != "" && xepgChannel.XBackupChannel1 != "-") || (xepgChannel.XBackupChannel2 != "" && xepgChannel.XBackupChannel2 != "-") || (xepgChannel.XBackupChannel3 != "" && xepgChannel.XBackupChannel3 != "-") {
-			for _, stream := range Data.Streams.Active {
-				var m3uChannel M3UChannelStructXEPG
+			backup_channel1 := strings.Trim(xepgChannel.XBackupChannel1, " ")
+			if m3uChannel, ok := activeStreamsByTvgName[backup_channel1]; ok {
+				xepgChannel.BackupChannel1 = &BackupStream{PlaylistID: m3uChannel.FileM3UID, URL: m3uChannel.URL}
+			}
 
-				err = json.Unmarshal([]byte(mapToJSON(stream)), &m3uChannel)
-				if err != nil {
-					return err
-				}
+			backup_channel2 := strings.Trim(xepgChannel.XBackupChannel2, " ")
+			if m3uChannel, ok := activeStreamsByTvgName[backup_channel2]; ok {
+				xepgChannel.BackupChannel2 = &BackupStream{PlaylistID: m3uChannel.FileM3UID, URL: m3uChannel.URL}
+			}
 
-				if m3uChannel.TvgName == "" {
-					m3uChannel.TvgName = m3uChannel.Name
-				}
-
-				backup_channel1 := strings.Trim(xepgChannel.XBackupChannel1, " ")
-				if m3uChannel.TvgName == backup_channel1 {
-					xepgChannel.BackupChannel1 = &BackupStream{PlaylistID: m3uChannel.FileM3UID, URL: m3uChannel.URL}
-				}
-
-				backup_channel2 := strings.Trim(xepgChannel.XBackupChannel2, " ")
-				if m3uChannel.TvgName == backup_channel2 {
-					xepgChannel.BackupChannel2 = &BackupStream{PlaylistID: m3uChannel.FileM3UID, URL: m3uChannel.URL}
-				}
-
-				backup_channel3 := strings.Trim(xepgChannel.XBackupChannel3, " ")
-				if m3uChannel.TvgName == backup_channel3 {
-					xepgChannel.BackupChannel3 = &BackupStream{PlaylistID: m3uChannel.FileM3UID, URL: m3uChannel.URL}
-				}
+			backup_channel3 := strings.Trim(xepgChannel.XBackupChannel3, " ")
+			if m3uChannel, ok := activeStreamsByTvgName[backup_channel3]; ok {
+				xepgChannel.BackupChannel3 = &BackupStream{PlaylistID: m3uChannel.FileM3UID, URL: m3uChannel.URL}
 			}
 		}
 
@@ -1004,7 +1010,7 @@ func createXMLTVFile() (err error) {
 
 	for _, dxc := range Data.XEPG.Channels {
 		var xepgChannel XEPGChannelStruct
-		err := json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err := remarshalJSON(dxc, &xepgChannel)
 		if err == nil {
 			entries = append(entries, channelEntry{idx: len(entries), ch: xepgChannel})
 		}
@@ -1738,7 +1744,7 @@ func cleanupXEPG() {
 	for id, dxc := range Data.XEPG.Channels {
 
 		var xepgChannel XEPGChannelStruct
-		err := json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err := remarshalJSON(dxc, &xepgChannel)
 		if err == nil {
 
 			if xepgChannel.TvgName == "" {
@@ -1800,7 +1806,7 @@ func removeDuplicateChannels() {
 
 	for id, dxc := range Data.XEPG.Channels {
 		var xepgChannel XEPGChannelStruct
-		err := json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err := remarshalJSON(dxc, &xepgChannel)
 		if err != nil {
 			continue
 		}
@@ -1915,7 +1921,7 @@ func shouldRemoveAsNameDuplicate(currentID, existingID string) bool {
 func getChannelByID(id string) *XEPGChannelStruct {
 	if dxc, exists := Data.XEPG.Channels[id]; exists {
 		var channel XEPGChannelStruct
-		if err := json.Unmarshal([]byte(mapToJSON(dxc)), &channel); err == nil {
+		if err := remarshalJSON(dxc, &channel); err == nil {
 			return &channel
 		}
 	}
@@ -1976,7 +1982,7 @@ func getStreamByChannelID(channelID string) (playlistID, streamURL string, err e
 	for _, dxc := range Data.XEPG.Channels {
 
 		var xepgChannel XEPGChannelStruct
-		err := json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err := remarshalJSON(dxc, &xepgChannel)
 
 		if err == nil {
 

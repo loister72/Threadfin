@@ -1,6 +1,7 @@
 package src
 
 import (
+	"io"
 	"reflect"
 	"testing"
 )
@@ -141,4 +142,69 @@ func TestResolveThirdPartyEngineRejectsUnsupportedBuffer(t *testing.T) {
 	if supported {
 		t.Fatal("resolveThirdPartyEngine supported = true, want false")
 	}
+}
+
+func TestThirdPartySegmentWriterRotatesSegments(t *testing.T) {
+	initBufferVFS()
+
+	writer := NewThirdPartySegmentWriter("/stream-test/", 8)
+	if err := writer.Reset(); err != nil {
+		t.Fatalf("Reset returned error: %v", err)
+	}
+	if err := writer.CreateCurrent(); err != nil {
+		t.Fatalf("CreateCurrent returned error: %v", err)
+	}
+	if err := writer.OpenCurrent(); err != nil {
+		t.Fatalf("OpenCurrent returned error: %v", err)
+	}
+
+	if _, err := writer.Write([]byte("abcd")); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if !writer.ShouldRotate() {
+		t.Fatal("ShouldRotate = false, want true after half-buffer segment")
+	}
+	if err := writer.Rotate(); err != nil {
+		t.Fatalf("Rotate returned error: %v", err)
+	}
+
+	if writer.Segment() != 2 {
+		t.Fatalf("Segment = %d, want 2", writer.Segment())
+	}
+	if writer.CurrentSize() != 0 {
+		t.Fatalf("CurrentSize = %d, want 0 after rotate", writer.CurrentSize())
+	}
+
+	if _, err := writer.Write([]byte("xy")); err != nil {
+		t.Fatalf("second Write returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	first, err := readBufferVFSTestFile("/stream-test/1.ts")
+	if err != nil {
+		t.Fatalf("read first segment: %v", err)
+	}
+	second, err := readBufferVFSTestFile("/stream-test/2.ts")
+	if err != nil {
+		t.Fatalf("read second segment: %v", err)
+	}
+
+	if string(first) != "abcd" {
+		t.Fatalf("first segment = %q, want %q", first, "abcd")
+	}
+	if string(second) != "xy" {
+		t.Fatalf("second segment = %q, want %q", second, "xy")
+	}
+}
+
+func readBufferVFSTestFile(filename string) ([]byte, error) {
+	f, err := bufferVFS.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return io.ReadAll(f)
 }

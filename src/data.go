@@ -1,7 +1,6 @@
 package src
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -145,7 +144,7 @@ func updateServerSettings(request RequestStruct) (settings SettingsStruct, err e
 	}
 
 	// Einstellungen aktualisieren
-	err = json.Unmarshal([]byte(mapToJSON(oldSettings)), &Settings)
+	err = remarshalJSON(oldSettings, &Settings)
 	if err != nil {
 		return
 	}
@@ -492,8 +491,6 @@ func saveFilter(request RequestStruct) (settings SettingsStruct, err error) {
 	}
 
 	settings = Settings
-
-
 	err = buildDatabaseDVR()
 	if err != nil {
 		return
@@ -516,7 +513,7 @@ func saveXEpgMapping(request RequestStruct) (err error) {
 		ShowError(err, 0)
 	}
 
-	err = json.Unmarshal([]byte(mapToJSON(request.EpgMapping)), &tmp)
+	err = remarshalJSON(request.EpgMapping, &tmp)
 	if err != nil {
 		return
 	}
@@ -759,7 +756,7 @@ func createFilterRules() (err error) {
 
 		var exclude, include string
 
-		err = json.Unmarshal([]byte(mapToJSON(f)), &filter)
+		err = remarshalJSON(f, &filter)
 		if err != nil {
 			return
 		}

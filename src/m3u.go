@@ -217,7 +217,7 @@ func buildM3U(groups []string) (m3u string, err error) {
 	deactivatedPerGroup := make(map[string]int)
 	for _, dxc := range Data.XEPG.Channels {
 		var ch XEPGChannelStruct
-		if err := json.Unmarshal([]byte(mapToJSON(dxc)), &ch); err == nil {
+		if err := remarshalJSON(dxc, &ch); err == nil {
 			group := ch.XGroupTitle
 			if ch.XCategory != "" {
 				group = ch.XCategory
@@ -233,7 +233,7 @@ func buildM3U(groups []string) (m3u string, err error) {
 
 	for _, dxc := range Data.XEPG.Channels {
 		var xepgChannel XEPGChannelStruct
-		err := json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+		err := remarshalJSON(dxc, &xepgChannel)
 		if err == nil {
 			if xepgChannel.TvgName == "" {
 				xepgChannel.TvgName = xepgChannel.Name
@@ -329,7 +329,7 @@ func buildM3U(groups []string) (m3u string, err error) {
 			}
 		}
 
-        // Disabling so not to rewrite stream to https domain when disable stream from https set
+		// Disabling so not to rewrite stream to https domain when disable stream from https set
 		if Settings.ForceHttps && Settings.HttpsThreadfinDomain != "" && Settings.ExcludeStreamHttps == false {
 			u, err := url.Parse(channel.URL)
 			if err == nil {
@@ -344,7 +344,7 @@ func buildM3U(groups []string) (m3u string, err error) {
 					channel.URL = fmt.Sprintf("https://%s:%d%s", u.Host, Settings.HttpsPort, u.Path)
 				}
 			}
-	    }
+		}
 
 		logo := ""
 		if channel.TvgLogo != "" {

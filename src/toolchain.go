@@ -238,6 +238,15 @@ func mapToJSON(tmpMap interface{}) string {
 	return string(jsonString)
 }
 
+func remarshalJSON(src interface{}, dst interface{}) error {
+	jsonString, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(jsonString, dst)
+}
+
 func jsonToMap(content string) map[string]interface{} {
 
 	var tmpMap = make(map[string]interface{})

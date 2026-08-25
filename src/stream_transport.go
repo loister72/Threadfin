@@ -1,0 +1,101 @@
+package src
+
+import (
+	"fmt"
+	"io"
+	"os"
+)
+
+type ThirdPartySegmentWriter struct {
+	folder       string
+	segment      int
+	fileSize     int
+	rotateAtSize int
+	file         io.WriteCloser
+}
+
+func NewThirdPartySegmentWriter(folder string, bufferSizeBytes int) *ThirdPartySegmentWriter {
+	return &ThirdPartySegmentWriter{
+		folder:       folder,
+		segment:      1,
+		rotateAtSize: bufferSizeBytes / 2,
+	}
+}
+
+func (w *ThirdPartySegmentWriter) Reset() error {
+	if err := bufferVFS.RemoveAll(getPlatformPath(w.folder)); err != nil {
+		ShowError(err, 4005)
+	}
+
+	return checkVFSFolder(w.folder, bufferVFS)
+}
+
+func (w *ThirdPartySegmentWriter) CreateCurrent() error {
+	f, err := bufferVFS.Create(w.currentPath())
+	if err != nil {
+		return err
+	}
+
+	return f.Close()
+}
+
+func (w *ThirdPartySegmentWriter) OpenCurrent() error {
+	f, err := bufferVFS.OpenFile(w.currentPath(), os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+
+	w.file = f
+	return nil
+}
+
+func (w *ThirdPartySegmentWriter) Write(p []byte) (int, error) {
+	if w.file == nil {
+		return 0, fmt.Errorf("segment writer is not open")
+	}
+
+	n, err := w.file.Write(p)
+	w.fileSize += n
+	return n, err
+}
+
+func (w *ThirdPartySegmentWriter) ShouldRotate() bool {
+	return w.fileSize >= w.rotateAtSize
+}
+
+func (w *ThirdPartySegmentWriter) Rotate() error {
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	w.segment++
+	w.fileSize = 0
+
+	if err := w.CreateCurrent(); err != nil {
+		return err
+	}
+
+	return w.OpenCurrent()
+}
+
+func (w *ThirdPartySegmentWriter) Close() error {
+	if w.file == nil {
+		return nil
+	}
+
+	err := w.file.Close()
+	w.file = nil
+	return err
+}
+
+func (w *ThirdPartySegmentWriter) CurrentSize() int {
+	return w.fileSize
+}
+
+func (w *ThirdPartySegmentWriter) Segment() int {
+	return w.segment
+}
+
+func (w *ThirdPartySegmentWriter) currentPath() string {
+	return fmt.Sprintf("%s%d.ts", w.folder, w.segment)
+}
