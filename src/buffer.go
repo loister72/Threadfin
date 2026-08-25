@@ -7,7 +7,6 @@ package src
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +18,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/avfs/avfs/vfs/memfs"
@@ -150,6 +148,159 @@ func redactStreamURL(rawURL string) string {
 	u.User = nil
 
 	return u.String()
+}
+
+type thirdPartyEngineConfig struct {
+	BufferType string
+	Options    string
+	Path       string
+	URL        string
+}
+
+func selectThirdPartyStreamURL(stream ThisStream, useBackup bool, backupNumber int) (streamURL string, selectedBackup int) {
+	streamURL = stream.URL
+
+	if !useBackup {
+		return streamURL, 0
+	}
+
+	switch backupNumber {
+	case 1:
+		if stream.BackupChannel1 != nil {
+			return stream.BackupChannel1.URL, 1
+		}
+	case 2:
+		if stream.BackupChannel2 != nil {
+			return stream.BackupChannel2.URL, 2
+		}
+	case 3:
+		if stream.BackupChannel3 != nil {
+			return stream.BackupChannel3.URL, 3
+		}
+	}
+
+	return streamURL, 0
+}
+
+func nextBackupNumber(stream ThisStream, currentBackup int) (int, bool) {
+	for backupNumber := currentBackup + 1; backupNumber <= 3; backupNumber++ {
+		switch backupNumber {
+		case 1:
+			if stream.BackupChannel1 != nil {
+				return backupNumber, true
+			}
+		case 2:
+			if stream.BackupChannel2 != nil {
+				return backupNumber, true
+			}
+		case 3:
+			if stream.BackupChannel3 != nil {
+				return backupNumber, true
+			}
+		}
+	}
+
+	return 0, false
+}
+
+func resolveThirdPartyEngine(playlist Playlist, streamURL string) (config thirdPartyEngineConfig, forcedHTTP bool, supported bool) {
+	config = thirdPartyEngineConfig{
+		BufferType: strings.ToUpper(playlist.Buffer),
+		URL:        streamURL,
+	}
+
+	switch playlist.Buffer {
+	case "ffmpeg":
+		config.Path = Settings.FFmpegPath
+		config.Options = Settings.FFmpegOptions
+		if Settings.FFmpegForceHttp {
+			config.URL = strings.Replace(config.URL, "https://", "http://", -1)
+			return config, true, true
+		}
+	case "vlc":
+		config.Path = Settings.VLCPath
+		config.Options = Settings.VLCOptions
+	default:
+		return config, false, false
+	}
+
+	return config, false, true
+}
+
+func buildThirdPartyArgs(bufferType, options, streamURL string, playlist Playlist) ([]string, error) {
+	parsedOptions, err := splitCommandLine(options)
+	if err != nil {
+		return nil, err
+	}
+
+	var args []string
+
+	for i, a := range parsedOptions {
+		switch bufferType {
+		case "FFMPEG":
+			a = strings.Replace(a, "[URL]", streamURL, -1)
+			if i == 0 {
+				if len(Settings.UserAgent) != 0 {
+					args = []string{"-user_agent", Settings.UserAgent}
+				}
+
+				if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+					args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+				}
+
+				var headers string
+				if len(playlist.HttpUserReferer) != 0 {
+					headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
+				}
+				if len(playlist.HttpUserOrigin) != 0 {
+					headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
+				}
+				if headers != "" {
+					args = append(args, "-headers", headers)
+				}
+			}
+
+			args = append(args, a)
+
+		case "VLC":
+			if a == "[URL]" {
+				args = append(args, streamURL)
+
+				if len(Settings.UserAgent) != 0 {
+					args = append(args, fmt.Sprintf(":http-user-agent=%s", Settings.UserAgent))
+				}
+
+				if len(playlist.HttpUserReferer) != 0 {
+					args = append(args, fmt.Sprintf(":http-referrer=%s", playlist.HttpUserReferer))
+				}
+
+				if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+					args = append(args, fmt.Sprintf(":http-proxy=%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+				}
+			} else {
+				args = append(args, a)
+			}
+		}
+	}
+
+	return args, nil
+}
+
+func setThirdPartyStreamError(playlistID string, stream ThisStream, err error) {
+	if c, ok := BufferClients.Load(playlistID + stream.MD5); ok {
+		clients := c.(ClientConnection)
+		clients.Error = err
+		BufferClients.Store(playlistID+stream.MD5, clients)
+	}
+}
+
+func addThirdPartyErrorToStream(streamID int, playlistID string, stream ThisStream, backupNumber int, err error) {
+	if nextBackup, ok := nextBackupNumber(stream, backupNumber); ok {
+		thirdPartyBuffer(streamID, playlistID, true, nextBackup)
+		return
+	}
+
+	setThirdPartyStreamError(playlistID, stream, err)
 }
 
 func bufferingStream(playlistID string, streamingURL string, backupStream1 *BackupStream, backupStream2 *BackupStream, backupStream3 *BackupStream, channelName string, w http.ResponseWriter, r *http.Request) {
@@ -1028,84 +1179,28 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 	if p, ok := BufferInformation.Load(playlistID); ok {
 
 		var playlist = p.(Playlist)
-		var debug, path, options, bufferType string
+		var debug string
 		var tmpSegment = 1
 		var bufferSize = Settings.BufferSize * 1024
 		var stream = playlist.Streams[streamID]
-		var buf bytes.Buffer
 		var fileSize = 0
 		var streamStatus = make(chan bool)
 
 		var tmpFolder = playlist.Streams[streamID].Folder
-		var url = playlist.Streams[streamID].URL
-		if useBackup {
-			if backupNumber >= 1 && backupNumber <= 3 {
-				switch backupNumber {
-				case 1:
-					if stream.BackupChannel1 != nil {
-						url = stream.BackupChannel1.URL
-						showHighlight("START OF BACKUP 1 STREAM")
-						showInfo("Backup Channel 1 URL: " + redactStreamURL(url))
-					}
-				case 2:
-					if stream.BackupChannel2 != nil {
-						url = stream.BackupChannel2.URL
-						showHighlight("START OF BACKUP 2 STREAM")
-						showInfo("Backup Channel 2 URL: " + redactStreamURL(url))
-					}
-				case 3:
-					if stream.BackupChannel3 != nil {
-						url = stream.BackupChannel3.URL
-						showHighlight("START OF BACKUP 3 STREAM")
-						showInfo("Backup Channel 3 URL: " + redactStreamURL(url))
-					}
-				}
-			}
+		var url, selectedBackup = selectThirdPartyStreamURL(stream, useBackup, backupNumber)
+		if selectedBackup > 0 {
+			showHighlight(fmt.Sprintf("START OF BACKUP %d STREAM", selectedBackup))
+			showInfo(fmt.Sprintf("Backup Channel %d URL: %s", selectedBackup, redactStreamURL(url)))
 		}
 
 		stream.Status = false
 
-		bufferType = strings.ToUpper(playlist.Buffer)
-
-		switch playlist.Buffer {
-
-		case "ffmpeg":
-
-			if Settings.FFmpegForceHttp {
-				url = strings.Replace(url, "https://", "http://", -1)
-				showInfo("Forcing URL to HTTP for FFMPEG: " + url)
-			}
-
-			path = Settings.FFmpegPath
-			options = Settings.FFmpegOptions
-
-		case "vlc":
-			path = Settings.VLCPath
-			options = Settings.VLCOptions
-
-		default:
+		engine, forcedHTTP, supportedEngine := resolveThirdPartyEngine(playlist, url)
+		if !supportedEngine {
 			return
 		}
-
-		var addErrorToStream = func(err error) {
-			if !useBackup || (useBackup && backupNumber >= 0 && backupNumber <= 3) {
-				backupNumber = backupNumber + 1
-				if stream.BackupChannel1 != nil || stream.BackupChannel2 != nil || stream.BackupChannel3 != nil {
-					thirdPartyBuffer(streamID, playlistID, true, backupNumber)
-				}
-				return
-			}
-
-			var stream = playlist.Streams[streamID]
-
-			if c, ok := BufferClients.Load(playlistID + stream.MD5); ok {
-
-				var clients = c.(ClientConnection)
-				clients.Error = err
-				BufferClients.Store(playlistID+stream.MD5, clients)
-
-			}
-
+		if forcedHTTP {
+			showInfo("Forcing URL to HTTP for FFMPEG: " + redactStreamURL(engine.URL))
 		}
 
 		if err := bufferVFS.RemoveAll(getPlatformPath(tmpFolder)); err != nil {
@@ -1116,20 +1211,20 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 			return
 		}
 
-		err = checkFile(path)
+		err = checkFile(engine.Path)
 		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 			return
 		}
 
-		showInfo(fmt.Sprintf("%s path:%s", bufferType, path))
-		showInfo("Streaming URL:" + redactStreamURL(url))
+		showInfo(fmt.Sprintf("%s path:%s", engine.BufferType, engine.Path))
+		showInfo("Streaming URL:" + redactStreamURL(engine.URL))
 
 		var tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
 
@@ -1137,82 +1232,24 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 			return
 		}
 		f.Close()
 
-		//args = strings.Replace(args, "[USER-AGENT]", Settings.UserAgent, -1)
-
-		// Set User-Agent
-		var args []string
-
-		parsedOptions, err := splitCommandLine(options)
+		args, err := buildThirdPartyArgs(engine.BufferType, engine.Options, engine.URL, playlist)
 		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 			return
 		}
 
-		for i, a := range parsedOptions {
-
-			switch bufferType {
-			case "FFMPEG":
-				a = strings.Replace(a, "[URL]", url, -1)
-				if i == 0 {
-					if len(Settings.UserAgent) != 0 {
-						args = []string{"-user_agent", Settings.UserAgent}
-					}
-
-					if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
-						args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
-					}
-
-					var headers string
-					if len(playlist.HttpUserReferer) != 0 {
-						headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
-					}
-					if len(playlist.HttpUserOrigin) != 0 {
-						headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
-					}
-					if headers != "" {
-						args = append(args, "-headers", headers)
-					}
-				}
-
-				args = append(args, a)
-
-			case "VLC":
-				if a == "[URL]" {
-					a = strings.Replace(a, "[URL]", url, -1)
-					args = append(args, a)
-
-					if len(Settings.UserAgent) != 0 {
-						args = append(args, fmt.Sprintf(":http-user-agent=%s", Settings.UserAgent))
-					}
-
-					if len(playlist.HttpUserReferer) != 0 {
-						args = append(args, fmt.Sprintf(":http-referrer=%s", playlist.HttpUserReferer))
-					}
-
-					if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
-						args = append(args, fmt.Sprintf(":http-proxy=%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
-					}
-
-				} else {
-					args = append(args, a)
-				}
-
-			}
-
-		}
-
-		var cmd = exec.Command(path, args...)
+		var cmd = exec.Command(engine.Path, args...)
 		// Set this explicitly to avoid issues with VLC
 		cmd.Env = append(os.Environ(), "DISPLAY=:0")
 
-		debug = fmt.Sprintf("BUFFER DEBUG: %s:%s %s", bufferType, path, args)
+		debug = fmt.Sprintf("BUFFER DEBUG: %s:%s %s", engine.BufferType, engine.Path, args)
 		showDebug(debug, 1)
 
 		// Byte data from the process
@@ -1220,7 +1257,7 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 			return
 		}
 
@@ -1229,18 +1266,18 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 			return
 		}
 
-		if len(buf.Bytes()) == 0 && !stream.Status {
-			showInfo(bufferType + ":Processing data")
+		if !stream.Status {
+			showInfo(engine.BufferType + ":Processing data")
 		}
 
 		if err := cmd.Start(); err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 			return
 		}
 
@@ -1252,7 +1289,7 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 
 			for scanner.Scan() {
 
-				debug = fmt.Sprintf("%s log:%s", bufferType, strings.TrimSpace(scanner.Text()))
+				debug = fmt.Sprintf("%s log:%s", engine.BufferType, strings.TrimSpace(scanner.Text()))
 
 				select {
 				case <-streamStatus:
@@ -1269,11 +1306,10 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 
 		f, err = bufferVFS.OpenFile(tmpFile, os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
-			cmd.Process.Kill()
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			cmd.Wait()
+			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
+			terminateProcessGracefully(cmd)
 			return
 		}
 		defer f.Close()
@@ -1311,12 +1347,11 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 			select {
 			case timeout := <-t:
 				if timeout >= 20 && tmpSegment == 1 {
-					cmd.Process.Kill()
 					err = errors.New("Timeout")
 					ShowError(err, 4006)
 					killClientConnection(streamID, playlistID, false)
-					addErrorToStream(err)
-					cmd.Wait()
+					addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
+					terminateProcessGracefully(cmd)
 					f.Close()
 					return
 				}
@@ -1326,13 +1361,12 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 			}
 
 			if fileSize == 0 && !stream.Status {
-				showInfo("Streaming Status:Receive data from " + bufferType)
+				showInfo("Streaming Status:Receive data from " + engine.BufferType)
 			}
 
 			if !clientConnection(stream) {
-				cmd.Process.Kill()
 				f.Close()
-				cmd.Wait()
+				terminateProcessGracefully(cmd)
 				return
 			}
 
@@ -1344,11 +1378,10 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 			fileSize = fileSize + len(buffer[:n])
 
 			if _, err := f.Write(buffer[:n]); err != nil {
-				cmd.Process.Kill()
 				ShowError(err, 0)
 				killClientConnection(streamID, playlistID, false)
-				addErrorToStream(err)
-				cmd.Wait()
+				addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
+				terminateProcessGracefully(cmd)
 				return
 			}
 
@@ -1357,7 +1390,7 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 				if tmpSegment == 1 && !stream.Status {
 					close(t)
 					close(streamStatus)
-					showInfo(fmt.Sprintf("Streaming Status:Buffering data from %s", bufferType))
+					showInfo(fmt.Sprintf("Streaming Status:Buffering data from %s", engine.BufferType))
 				}
 
 				f.Close()
@@ -1383,11 +1416,10 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 					if err == nil {
 						err = errOpen
 					}
-					cmd.Process.Kill()
 					ShowError(err, 0)
 					killClientConnection(streamID, playlistID, false)
-					addErrorToStream(err)
-					cmd.Wait()
+					addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
+					terminateProcessGracefully(cmd)
 					return
 				}
 
@@ -1395,11 +1427,10 @@ func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNum
 
 		}
 
-		cmd.Process.Kill()
-		cmd.Wait()
+		terminateProcessGracefully(cmd)
 
-		err = errors.New(bufferType + " error")
-		addErrorToStream(err)
+		err = errors.New(engine.BufferType + " error")
+		addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 		ShowError(err, 1204)
 
 		time.Sleep(time.Duration(500) * time.Millisecond)
@@ -1538,15 +1569,10 @@ func debugResponse(resp *http.Response) {
 }
 
 func terminateProcessGracefully(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		// Send a SIGTERM to the process
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			// If an error occurred while trying to send the SIGTERM, you might resort to a SIGKILL.
-			ShowError(err, 0)
-			cmd.Process.Kill()
-		}
-
-		// Optionally, you can wait for the process to finish too
-		cmd.Wait()
+	if cmd == nil || cmd.Process == nil {
+		return
 	}
+
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
 }
