@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - pdgeek-production
   pull_request:
 
 permissions:
