@@ -6,7 +6,10 @@ import (
 	"os"
 )
 
-const maxThirdPartySegmentSize = 128 * 1024
+const (
+	maxThirdPartySegmentSize        = 128 * 1024
+	maxThirdPartyStartupSegmentSize = 32 * 1024
+)
 
 type ThirdPartySegmentWriter struct {
 	folder       string
@@ -73,7 +76,7 @@ func (w *ThirdPartySegmentWriter) Write(p []byte) (int, error) {
 }
 
 func (w *ThirdPartySegmentWriter) ShouldRotate() bool {
-	return w.fileSize >= w.rotateAtSize
+	return w.fileSize >= w.currentRotateSize()
 }
 
 func (w *ThirdPartySegmentWriter) Rotate() error {
@@ -107,6 +110,13 @@ func (w *ThirdPartySegmentWriter) CurrentSize() int {
 
 func (w *ThirdPartySegmentWriter) Segment() int {
 	return w.segment
+}
+
+func (w *ThirdPartySegmentWriter) currentRotateSize() int {
+	if w.segment == 1 && w.rotateAtSize > maxThirdPartyStartupSegmentSize {
+		return maxThirdPartyStartupSegmentSize
+	}
+	return w.rotateAtSize
 }
 
 func (w *ThirdPartySegmentWriter) currentPath() string {

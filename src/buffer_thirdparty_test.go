@@ -206,6 +206,19 @@ func TestThirdPartySegmentRotateSizeIsCapped(t *testing.T) {
 	}
 }
 
+func TestThirdPartySegmentWriterUsesSmallerStartupSegment(t *testing.T) {
+	writer := NewThirdPartySegmentWriter("/stream-test/", 2*1024*1024)
+
+	if got := writer.currentRotateSize(); got != maxThirdPartyStartupSegmentSize {
+		t.Fatalf("startup currentRotateSize = %d, want %d", got, maxThirdPartyStartupSegmentSize)
+	}
+
+	writer.segment = 2
+	if got := writer.currentRotateSize(); got != maxThirdPartySegmentSize {
+		t.Fatalf("steady currentRotateSize = %d, want %d", got, maxThirdPartySegmentSize)
+	}
+}
+
 func readBufferVFSTestFile(filename string) ([]byte, error) {
 	f, err := bufferVFS.Open(filename)
 	if err != nil {
