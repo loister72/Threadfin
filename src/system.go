@@ -151,7 +151,7 @@ func loadSettings() (settings SettingsStruct, err error) {
 	defaults["ssdp"] = true
 	defaults["storeBufferInRAM"] = true
 	defaults["forceHttps"] = false
-    defaults["excludeStreamHttps"] = false
+	defaults["excludeStreamHttps"] = false
 	defaults["httpsPort"] = 443
 	defaults["httpsThreadfinDomain"] = ""
 	defaults["httpThreadfinDomain"] = ""
@@ -379,10 +379,6 @@ func getStreamInfo(urlID string) (streamInfo StreamInfo, err error) {
 
 	if s, ok := Data.Cache.StreamingURLS[urlID]; ok {
 		s.URL = strings.Trim(s.URL, "\r\n")
-		s.BackupChannel1 = s.BackupChannel1
-		s.BackupChannel2 = s.BackupChannel2
-		s.BackupChannel3 = s.BackupChannel3
-
 		streamInfo = s
 	} else {
 		err = errors.New("streaming error")

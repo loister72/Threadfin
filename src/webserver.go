@@ -466,7 +466,6 @@ func WS(w http.ResponseWriter, r *http.Request) {
 				ShowError(err, 1022)
 			} else {
 				return
-				break
 			}
 			return
 
