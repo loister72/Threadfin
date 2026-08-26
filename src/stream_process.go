@@ -1,18 +1,23 @@
 package src
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 )
 
+const thirdPartyStderrTailBytes = 8192
+
 type ThirdPartyProcess struct {
-	cmd    *exec.Cmd
-	stdout io.ReadCloser
-	stderr io.ReadCloser
-	once   sync.Once
+	cmd        *exec.Cmd
+	stdout     io.ReadCloser
+	stderr     io.ReadCloser
+	stderrTail *boundedLogBuffer
+	once       sync.Once
 }
 
 func StartThirdPartyProcess(path string, args []string) (*ThirdPartyProcess, error) {
@@ -34,9 +39,10 @@ func StartThirdPartyProcess(path string, args []string) (*ThirdPartyProcess, err
 	}
 
 	return &ThirdPartyProcess{
-		cmd:    cmd,
-		stdout: stdout,
-		stderr: stderr,
+		cmd:        cmd,
+		stdout:     stdout,
+		stderr:     stderr,
+		stderrTail: newBoundedLogBuffer(thirdPartyStderrTailBytes),
 	}, nil
 }
 
@@ -51,7 +57,15 @@ func (p *ThirdPartyProcess) Stderr() io.Reader {
 	if p == nil {
 		return strings.NewReader("")
 	}
-	return p.stderr
+	return io.TeeReader(p.stderr, p.stderrTail)
+}
+
+func (p *ThirdPartyProcess) StderrTail() string {
+	if p == nil || p.stderrTail == nil {
+		return ""
+	}
+
+	return RedactLogText(p.stderrTail.String())
 }
 
 func (p *ThirdPartyProcess) Terminate() {
@@ -78,4 +92,39 @@ func RedactCommandArgs(args []string) []string {
 	}
 
 	return redacted
+}
+
+var logURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+func RedactLogText(value string) string {
+	return logURLPattern.ReplaceAllStringFunc(value, redactStreamURL)
+}
+
+type boundedLogBuffer struct {
+	mu    sync.Mutex
+	limit int
+	buf   []byte
+}
+
+func newBoundedLogBuffer(limit int) *boundedLogBuffer {
+	return &boundedLogBuffer{limit: limit}
+}
+
+func (b *boundedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		b.buf = append([]byte(nil), b.buf[len(b.buf)-b.limit:]...)
+	}
+
+	return len(p), nil
+}
+
+func (b *boundedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return string(bytes.TrimSpace(b.buf))
 }

@@ -152,6 +152,7 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 				break
 			}
 			if err != nil {
+				err = withThirdPartyStderr(err, process)
 				ShowError(err, 0)
 				killClientConnection(streamID, playlistID, false)
 				addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
@@ -196,7 +197,7 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 
 		process.Terminate()
 
-		err = errors.New(engine.BufferType + " error")
+		err = withThirdPartyStderr(errors.New(engine.BufferType+" error"), process)
 		addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
 		ShowError(err, 1204)
 
@@ -211,4 +212,17 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 
 func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNumber int) {
 	ThirdPartyStreamEngine{}.Run(streamID, playlistID, useBackup, backupNumber)
+}
+
+func withThirdPartyStderr(err error, process *ThirdPartyProcess) error {
+	if err == nil || process == nil {
+		return err
+	}
+
+	stderr := process.StderrTail()
+	if stderr == "" {
+		return err
+	}
+
+	return fmt.Errorf("%w: %s", err, stderr)
 }

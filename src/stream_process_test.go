@@ -25,6 +25,32 @@ func TestRedactCommandArgsRemovesURLSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactLogTextRemovesURLSecrets(t *testing.T) {
+	got := RedactLogText("ffmpeg opened https://user:pass@example.test/live/channel.ts?token=secret and failed")
+
+	if strings.Contains(got, "secret") || strings.Contains(got, "user:pass") {
+		t.Fatalf("RedactLogText leaked secret in %q", got)
+	}
+	if !strings.Contains(got, "https://example.test/live/channel.ts") {
+		t.Fatalf("RedactLogText = %q, want sanitized URL", got)
+	}
+}
+
+func TestBoundedLogBufferKeepsTail(t *testing.T) {
+	buffer := newBoundedLogBuffer(5)
+
+	if _, err := buffer.Write([]byte("hello")); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if _, err := buffer.Write([]byte(" world")); err != nil {
+		t.Fatalf("write world: %v", err)
+	}
+
+	if got := buffer.String(); got != "world" {
+		t.Fatalf("boundedLogBuffer.String() = %q, want tail", got)
+	}
+}
+
 func TestThirdPartyProcessTerminateIsIdempotent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses sh")
