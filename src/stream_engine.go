@@ -122,47 +122,19 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 
 		reader := bufio.NewReader(process.Stdout())
 
-		t := make(chan int)
-		startupTimeout := int(thirdPartyStartupTimeout().Seconds())
-
-		go func() {
-
-			var timeout = 0
-			for {
-				time.Sleep(time.Duration(1000) * time.Millisecond)
-				timeout++
-
-				select {
-				case <-t:
-					return
-				default:
-					// Check if the channel is closed before sending
-					select {
-					case t <- timeout:
-					default:
-					}
-				}
-
-			}
-
-		}()
+		startedAt := time.Now()
+		startupTimeout := thirdPartyStartupTimeout()
 
 		for {
 
-			select {
-			case timeout := <-t:
-				if timeout >= startupTimeout && segmentWriter.Segment() == 1 {
-					err = errors.New("Timeout")
-					ShowError(err, 4006)
-					killClientConnection(streamID, playlistID, false)
-					addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
-					process.Terminate()
-					segmentWriter.Close()
-					return
-				}
-
-			default:
-
+			if time.Since(startedAt) >= startupTimeout && segmentWriter.Segment() == 1 {
+				err = errors.New("Timeout")
+				ShowError(err, 4006)
+				killClientConnection(streamID, playlistID, false)
+				addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
+				process.Terminate()
+				segmentWriter.Close()
+				return
 			}
 
 			if segmentWriter.CurrentSize() == 0 && !stream.Status {
@@ -179,6 +151,13 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 			if err == io.EOF {
 				break
 			}
+			if err != nil {
+				ShowError(err, 0)
+				killClientConnection(streamID, playlistID, false)
+				addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
+				process.Terminate()
+				return
+			}
 
 			if _, err := segmentWriter.Write(buffer[:n]); err != nil {
 				ShowError(err, 0)
@@ -191,7 +170,6 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 			if segmentWriter.ShouldRotate() {
 
 				if segmentWriter.Segment() == 1 && !stream.Status {
-					close(t)
 					close(streamStatus)
 					showInfo(fmt.Sprintf("Streaming Status:Buffering data from %s", engine.BufferType))
 				}

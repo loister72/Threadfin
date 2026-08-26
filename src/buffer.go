@@ -8,6 +8,7 @@ package src
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -855,60 +856,36 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 						if err != nil {
 							debug = fmt.Sprintf("Buffer Open (%s)", fileName)
 							showDebug(debug, 2)
+							killClientConnection(streamID, playlistID, false)
 							return
 						}
-						defer file.Close()
 
-						if err == nil {
+						debug = fmt.Sprintf("Buffer Status:Send to client (%s)", fileName)
+						showDebug(debug, 2)
 
-							l, err := file.Stat()
-							if err == nil {
+						if _, err := io.Copy(w, file); err != nil {
+							file.Close()
+							killClientConnection(streamID, playlistID, false)
+							return
+						}
 
-								debug = fmt.Sprintf("Buffer Status:Send to client (%s)", fileName)
-								showDebug(debug, 2)
-
-								var buffer = make([]byte, int(l.Size()))
-								_, err = file.Read(buffer)
-
-								if err == nil {
-
-									file.Seek(0, 0)
-
-									_, err := w.Write(buffer)
-
-									if err != nil {
-										file.Close()
-										killClientConnection(streamID, playlistID, false)
-										return
-									}
-
-									if flusher, ok := w.(http.Flusher); ok {
-										flusher.Flush()
-									}
-
-									file.Close()
-
-								}
-
-								file.Close()
-
-							}
-
-							var n = indexOfString(f, oldSegments)
-
-							if n > 20 {
-
-								var fileToRemove = stream.Folder + oldSegments[0]
-								if err = bufferVFS.RemoveAll(getPlatformFile(fileToRemove)); err != nil {
-									ShowError(err, 4007)
-								}
-								oldSegments = append(oldSegments[:0], oldSegments[0+1:]...)
-
-							}
-
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
 						}
 
 						file.Close()
+
+						var n = indexOfString(f, oldSegments)
+
+						if n > 20 {
+
+							var fileToRemove = stream.Folder + oldSegments[0]
+							if err = bufferVFS.RemoveAll(getPlatformFile(fileToRemove)); err != nil {
+								ShowError(err, 4007)
+							}
+							oldSegments = append(oldSegments[:0], oldSegments[0+1:]...)
+
+						}
 
 					}
 
@@ -947,7 +924,7 @@ func getBufTmpFiles(stream *ThisStream) (tmpFiles []string) {
 			return
 		}
 
-		if len(files) > 2 {
+		if len(files) > 1 {
 
 			for _, file := range files {
 

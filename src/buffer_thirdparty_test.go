@@ -416,6 +416,34 @@ func TestThirdPartySegmentWriterUsesSmallerStartupSegment(t *testing.T) {
 	}
 }
 
+func TestGetBufTmpFilesReturnsFirstCompleteSegmentAfterFirstRotation(t *testing.T) {
+	initBufferVFS()
+	writer := NewThirdPartySegmentWriter("/stream-test/", 1024)
+	if err := writer.Reset(); err != nil {
+		t.Fatalf("reset writer: %v", err)
+	}
+	if err := writer.CreateCurrent(); err != nil {
+		t.Fatalf("create first segment: %v", err)
+	}
+	if err := writer.OpenCurrent(); err != nil {
+		t.Fatalf("open first segment: %v", err)
+	}
+	if _, err := writer.Write([]byte("first")); err != nil {
+		t.Fatalf("write first segment: %v", err)
+	}
+	if err := writer.Rotate(); err != nil {
+		t.Fatalf("rotate to active segment: %v", err)
+	}
+	defer writer.Close()
+
+	stream := ThisStream{Folder: "/stream-test/"}
+	got := getBufTmpFiles(&stream)
+
+	if !reflect.DeepEqual(got, []string{"1.ts"}) {
+		t.Fatalf("getBufTmpFiles() = %#v, want first complete segment", got)
+	}
+}
+
 func readBufferVFSTestFile(filename string) ([]byte, error) {
 	f, err := bufferVFS.Open(filename)
 	if err != nil {
