@@ -4,6 +4,7 @@ import (
 	"io"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestNextBackupNumberSkipsMissingBackups(t *testing.T) {
@@ -137,10 +138,206 @@ func TestResolveThirdPartyEngineForceHTTP(t *testing.T) {
 	}
 }
 
+func TestResolveThirdPartyEngineHDHRProfileUsesFFmpeg(t *testing.T) {
+	oldSettings := Settings
+	t.Cleanup(func() { Settings = oldSettings })
+
+	Settings.FFmpegPath = "/usr/bin/ffmpeg"
+
+	got, forcedHTTP, supported := resolveThirdPartyEngine(Playlist{Buffer: "hdhr-remux"}, "https://source.example.test/live")
+	if !supported {
+		t.Fatal("resolveThirdPartyEngine supported = false, want true")
+	}
+	if forcedHTTP {
+		t.Fatal("resolveThirdPartyEngine forcedHTTP = true, want false")
+	}
+	if got.Path != Settings.FFmpegPath {
+		t.Fatalf("resolveThirdPartyEngine path = %q, want ffmpeg path", got.Path)
+	}
+	if got.BufferType != "HDHR-REMUX" {
+		t.Fatalf("resolveThirdPartyEngine BufferType = %q, want HDHR-REMUX", got.BufferType)
+	}
+}
+
 func TestResolveThirdPartyEngineRejectsUnsupportedBuffer(t *testing.T) {
 	_, _, supported := resolveThirdPartyEngine(Playlist{Buffer: "unknown"}, "https://source.example.test/live")
 	if supported {
 		t.Fatal("resolveThirdPartyEngine supported = true, want false")
+	}
+}
+
+func TestPlaylistBufferDefaultsToGlobal(t *testing.T) {
+	oldSettings := Settings
+	t.Cleanup(func() { Settings = oldSettings })
+
+	Settings.Buffer = "vlc"
+
+	if got := effectivePlaylistBuffer("default"); got != "vlc" {
+		t.Fatalf("effectivePlaylistBuffer(default) = %q, want vlc", got)
+	}
+	if got := effectivePlaylistBuffer(""); got != "vlc" {
+		t.Fatalf("effectivePlaylistBuffer(empty) = %q, want vlc", got)
+	}
+}
+
+func TestPlaylistBufferProviderOverrideIsExplicit(t *testing.T) {
+	oldSettings := Settings
+	t.Cleanup(func() { Settings = oldSettings })
+
+	Settings.Buffer = "vlc"
+	Settings.Files.M3U = map[string]interface{}{
+		"MTEST": map[string]interface{}{
+			"buffer":          "ffmpeg",
+			"buffer.override": true,
+		},
+	}
+
+	got, source := getPlaylistBuffer("MTEST")
+	if got != "ffmpeg" || source != "provider" {
+		t.Fatalf("getPlaylistBuffer override = %q, %q; want ffmpeg, provider", got, source)
+	}
+}
+
+func TestBuildThirdPartyArgsForHDHRRemux(t *testing.T) {
+	oldSettings := Settings
+	t.Cleanup(func() { Settings = oldSettings })
+
+	Settings.UserAgent = "Threadfin Test"
+	playlist := Playlist{
+		HttpProxyIP:     "127.0.0.1",
+		HttpProxyPort:   "8888",
+		HttpUserReferer: "https://referer.example.test/path",
+		HttpUserOrigin:  "https://origin.example.test",
+	}
+
+	got, err := buildThirdPartyArgs("HDHR-REMUX", "", "https://source.example.test/live token", playlist)
+	if err != nil {
+		t.Fatalf("buildThirdPartyArgs returned error: %v", err)
+	}
+
+	assertContainsInOrder(t, got, []string{
+		"-nostdin",
+		"-reconnect_streamed", "1",
+		"-reconnect_on_http_error", "4xx,5xx",
+		"-fflags", "+genpts+discardcorrupt",
+		"-user_agent", "Threadfin Test",
+		"-http_proxy", "http://127.0.0.1:8888",
+		"-headers", "Referer: https://referer.example.test/path\r\nOrigin: https://origin.example.test\r\n",
+		"-i", "https://source.example.test/live token",
+		"-map", "0:v:0?",
+		"-map", "0:a:0?",
+		"-sn",
+		"-c:v", "copy",
+		"-c:a", "aac",
+		"-ar", "48000",
+		"-ac", "2",
+		"-f", "mpegts",
+		"-mpegts_flags", "+resend_headers",
+		"pipe:1",
+	})
+}
+
+func TestBuildThirdPartyArgsForHDHRSafeAddsFrequentTables(t *testing.T) {
+	got, err := buildThirdPartyArgs("HDHR-SAFE", "", "https://source.example.test/live", Playlist{})
+	if err != nil {
+		t.Fatalf("buildThirdPartyArgs returned error: %v", err)
+	}
+
+	assertContainsInOrder(t, got, []string{
+		"-analyzeduration", "5000000",
+		"-probesize", "5000000",
+		"-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
+		"-pat_period", "0.1",
+		"-sdt_period", "0.5",
+		"-pcr_period", "20",
+		"pipe:1",
+	})
+}
+
+func assertContainsInOrder(t *testing.T, got []string, want []string) {
+	t.Helper()
+
+	next := 0
+	for _, value := range got {
+		if next < len(want) && value == want[next] {
+			next++
+		}
+	}
+
+	if next != len(want) {
+		t.Fatalf("args missing ordered values from %q at index %d; got %#v", want[next], next, got)
+	}
+}
+
+func TestNormalizeProviderBufferSettingsMigratesLegacyInheritedEngines(t *testing.T) {
+	settings := SettingsStruct{}
+	settings.Buffer = "vlc"
+	settings.Files.M3U = map[string]interface{}{
+		"MOLD": map[string]interface{}{"buffer": "ffmpeg"},
+		"MDIRECT": map[string]interface{}{
+			"buffer": "-",
+		},
+		"MOVERRIDE": map[string]interface{}{
+			"buffer":          "ffmpeg",
+			"buffer.override": true,
+		},
+	}
+	settings.Files.HDHR = map[string]interface{}{}
+
+	if !normalizeProviderBufferSettings(&settings) {
+		t.Fatal("normalizeProviderBufferSettings changed = false, want true")
+	}
+
+	if got := settings.Files.M3U["MOLD"].(map[string]interface{})["buffer"]; got != "default" {
+		t.Fatalf("legacy inherited buffer = %q, want default", got)
+	}
+	if got := settings.Files.M3U["MDIRECT"].(map[string]interface{})["buffer"]; got != "-" {
+		t.Fatalf("explicit direct buffer = %q, want -", got)
+	}
+	if got := settings.Files.M3U["MOVERRIDE"].(map[string]interface{})["buffer"]; got != "ffmpeg" {
+		t.Fatalf("explicit override buffer = %q, want ffmpeg", got)
+	}
+}
+
+func TestNormalizeProviderBufferSaveStoresDefaultForGlobalValue(t *testing.T) {
+	oldSettings := Settings
+	t.Cleanup(func() { Settings = oldSettings })
+
+	Settings.Buffer = "vlc"
+	provider := map[string]interface{}{"buffer": "vlc", "buffer.override": true}
+
+	normalizeProviderBufferSave(provider)
+
+	if got := provider["buffer"]; got != "default" {
+		t.Fatalf("provider buffer = %q, want default", got)
+	}
+	if _, ok := provider["buffer.override"]; ok {
+		t.Fatal("buffer.override was kept for default provider buffer")
+	}
+}
+
+func TestThirdPartyStartupTimeoutUsesConfiguredSeconds(t *testing.T) {
+	oldSettings := Settings
+	t.Cleanup(func() { Settings = oldSettings })
+
+	Settings.BufferTimeout = 12
+	if got := thirdPartyStartupTimeout(); got.Seconds() != 12 {
+		t.Fatalf("thirdPartyStartupTimeout = %s, want 12s", got)
+	}
+
+	Settings.BufferTimeout = 0
+	if got := thirdPartyStartupTimeout(); got != defaultThirdPartyStartupTimeout {
+		t.Fatalf("thirdPartyStartupTimeout default = %s, want %s", got, defaultThirdPartyStartupTimeout)
+	}
+
+	Settings.BufferTimeout = 0.1
+	if got := thirdPartyStartupTimeout(); got != time.Second {
+		t.Fatalf("thirdPartyStartupTimeout minimum = %s, want 1s", got)
+	}
+
+	Settings.BufferTimeout = 500
+	if got := thirdPartyStartupTimeout(); got != maxThirdPartyStartupTimeout {
+		t.Fatalf("thirdPartyStartupTimeout maximum = %s, want %s", got, maxThirdPartyStartupTimeout)
 	}
 }
 

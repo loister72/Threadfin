@@ -1395,9 +1395,9 @@ function openPopUp(dataType, element) {
       input.setAttribute("placeholder", "{{.playlist.fileM3U.placeholder}}")
       content.appendRow("{{.playlist.fileM3U.title}}", input)
 
-      var text: string[] = ["-", "FFmpeg", "VLC"]
-      var values: string[] = ["-", "ffmpeg", "vlc"]
-      var selected = SERVER["settings"]["buffer"]
+      var text: string[] = ["Global default", "-", "FFmpeg", "VLC", "HDHR Remux", "HDHR Safe"]
+      var values: string[] = ["default", "-", "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe"]
+      var selected = "default"
       if (data["buffer"] != undefined) {
         selected = data["buffer"]
       }
@@ -1496,9 +1496,9 @@ function openPopUp(dataType, element) {
       input.setAttribute("placeholder", "{{.playlist.fileHDHR.placeholder}}")
       content.appendRow("{{.playlist.fileHDHR.title}}", input)
 
-      var text: string[] = ["-", "FFmpeg", "VLC"]
-      var values: string[] = ["-", "ffmpeg", "vlc"]
-      var selected = SERVER["settings"]["buffer"]
+      var text: string[] = ["Global default", "-", "FFmpeg", "VLC", "HDHR Remux", "HDHR Safe"]
+      var values: string[] = ["default", "-", "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe"]
+      var selected = "default"
       if (data["buffer"] != undefined) {
         selected = data["buffer"]
       }

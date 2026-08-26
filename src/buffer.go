@@ -154,6 +154,129 @@ type thirdPartyEngineConfig struct {
 	URL        string
 }
 
+const playlistBufferDefault = "default"
+
+func normalizePlaylistBuffer(buffer interface{}) string {
+	value, ok := buffer.(string)
+	if !ok {
+		return playlistBufferDefault
+	}
+
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "global", "inherit":
+		return playlistBufferDefault
+	case playlistBufferDefault, "-", "threadfin", "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe":
+		return value
+	default:
+		return playlistBufferDefault
+	}
+}
+
+func effectivePlaylistBuffer(buffer string) string {
+	if normalizePlaylistBuffer(buffer) == playlistBufferDefault {
+		return normalizePlaylistBuffer(Settings.Buffer)
+	}
+	return normalizePlaylistBuffer(buffer)
+}
+
+func getPlaylistBuffer(playlistID string) (buffer string, source string) {
+	buffer = playlistBufferDefault
+	source = "global"
+
+	systemMutex.Lock()
+	defer systemMutex.Unlock()
+
+	playListInterface := Settings.Files.M3U[playlistID]
+	if playListInterface == nil {
+		playListInterface = Settings.Files.HDHR[playlistID]
+	}
+
+	if playListMap, ok := playListInterface.(map[string]interface{}); ok {
+		providerBuffer := normalizePlaylistBuffer(playListMap["buffer"])
+		if providerBuffer != playlistBufferDefault {
+			return providerBuffer, "provider"
+		}
+	}
+
+	return effectivePlaylistBuffer(playlistBufferDefault), source
+}
+
+func formatPlaylistBufferLog(buffer string, source string) string {
+	if source == "provider" && buffer != normalizePlaylistBuffer(Settings.Buffer) {
+		return fmt.Sprintf("%s provider override, global=%s", buffer, normalizePlaylistBuffer(Settings.Buffer))
+	}
+	return fmt.Sprintf("%s %s", buffer, source)
+}
+
+func normalizeProviderBufferSettings(settings *SettingsStruct) bool {
+	changed := false
+
+	normalizeFiles := func(files map[string]interface{}) {
+		for providerID, provider := range files {
+			providerMap, ok := provider.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			rawBuffer, hasBuffer := providerMap["buffer"]
+			buffer := normalizePlaylistBuffer(rawBuffer)
+			override, _ := providerMap["buffer.override"].(bool)
+
+			if !hasBuffer || buffer == playlistBufferDefault || buffer == normalizePlaylistBuffer(settings.Buffer) {
+				if providerMap["buffer"] != playlistBufferDefault {
+					providerMap["buffer"] = playlistBufferDefault
+					changed = true
+				}
+				if _, ok := providerMap["buffer.override"]; ok {
+					delete(providerMap, "buffer.override")
+					changed = true
+				}
+				files[providerID] = providerMap
+				continue
+			}
+
+			if buffer == "-" || override {
+				if providerMap["buffer"] != buffer {
+					providerMap["buffer"] = buffer
+					changed = true
+				}
+				files[providerID] = providerMap
+				continue
+			}
+
+			providerMap["buffer"] = playlistBufferDefault
+			delete(providerMap, "buffer.override")
+			files[providerID] = providerMap
+			changed = true
+		}
+	}
+
+	normalizeFiles(settings.Files.M3U)
+	normalizeFiles(settings.Files.HDHR)
+
+	return changed
+}
+
+func normalizeProviderBufferSave(provider map[string]interface{}) {
+	rawBuffer, ok := provider["buffer"]
+	if !ok {
+		return
+	}
+
+	buffer := normalizePlaylistBuffer(rawBuffer)
+	if buffer == playlistBufferDefault || buffer == normalizePlaylistBuffer(Settings.Buffer) {
+		provider["buffer"] = playlistBufferDefault
+		delete(provider, "buffer.override")
+		return
+	}
+
+	provider["buffer"] = buffer
+	if buffer != "-" {
+		provider["buffer.override"] = true
+	}
+}
+
 func selectThirdPartyStreamURL(stream ThisStream, useBackup bool, backupNumber int) (streamURL string, selectedBackup int) {
 	streamURL = stream.URL
 
@@ -201,15 +324,24 @@ func nextBackupNumber(stream ThisStream, currentBackup int) (int, bool) {
 }
 
 func resolveThirdPartyEngine(playlist Playlist, streamURL string) (config thirdPartyEngineConfig, forcedHTTP bool, supported bool) {
+	buffer := effectivePlaylistBuffer(playlist.Buffer)
 	config = thirdPartyEngineConfig{
-		BufferType: strings.ToUpper(playlist.Buffer),
+		BufferType: strings.ToUpper(buffer),
 		URL:        streamURL,
 	}
 
-	switch playlist.Buffer {
+	switch buffer {
 	case "ffmpeg":
 		config.Path = Settings.FFmpegPath
 		config.Options = Settings.FFmpegOptions
+		if Settings.FFmpegForceHttp {
+			config.URL = strings.Replace(config.URL, "https://", "http://", -1)
+			return config, true, true
+		}
+	case "hdhr-remux", "hdhr-safe":
+		config.BufferType = strings.ToUpper(buffer)
+		config.Path = Settings.FFmpegPath
+		config.Options = ""
 		if Settings.FFmpegForceHttp {
 			config.URL = strings.Replace(config.URL, "https://", "http://", -1)
 			return config, true, true
@@ -225,6 +357,13 @@ func resolveThirdPartyEngine(playlist Playlist, streamURL string) (config thirdP
 }
 
 func buildThirdPartyArgs(bufferType, options, streamURL string, playlist Playlist) ([]string, error) {
+	switch bufferType {
+	case "HDHR-REMUX":
+		return buildHDHRRemuxArgs(streamURL, playlist, false), nil
+	case "HDHR-SAFE":
+		return buildHDHRRemuxArgs(streamURL, playlist, true), nil
+	}
+
 	parsedOptions, err := splitCommandLine(options)
 	if err != nil {
 		return nil, err
@@ -283,6 +422,105 @@ func buildThirdPartyArgs(bufferType, options, streamURL string, playlist Playlis
 	return args, nil
 }
 
+func buildHDHRRemuxArgs(streamURL string, playlist Playlist, safe bool) []string {
+	args := []string{
+		"-nostdin",
+		"-hide_banner",
+		"-loglevel",
+		"warning",
+		"-reconnect",
+		"1",
+		"-reconnect_streamed",
+		"1",
+		"-reconnect_at_eof",
+		"1",
+		"-reconnect_on_network_error",
+		"1",
+		"-reconnect_on_http_error",
+		"4xx,5xx",
+	}
+
+	if safe {
+		args = append(args,
+			"-reconnect_delay_max", "10",
+			"-rw_timeout", "30000000",
+			"-analyzeduration", "5000000",
+			"-probesize", "5000000",
+		)
+	} else {
+		args = append(args,
+			"-reconnect_delay_max", "8",
+			"-rw_timeout", "25000000",
+			"-analyzeduration", "2000000",
+			"-probesize", "2000000",
+		)
+	}
+
+	args = append(args,
+		"-fflags", "+genpts+discardcorrupt",
+		"-err_detect", "ignore_err",
+	)
+
+	args = appendFFmpegHTTPArgs(args, playlist)
+
+	args = append(args,
+		"-i", streamURL,
+		"-map", "0:v:0?",
+		"-map", "0:a:0?",
+		"-sn",
+		"-c:v", "copy",
+		"-c:a", "aac",
+		"-ar", "48000",
+		"-ac", "2",
+		"-b:a", "128k",
+		"-af", "aresample=async=1:first_pts=0",
+		"-avoid_negative_ts", "make_zero",
+		"-muxpreload", "0",
+		"-muxdelay", "0",
+		"-flush_packets", "1",
+		"-f", "mpegts",
+	)
+
+	if safe {
+		args = append(args,
+			"-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
+			"-pat_period", "0.1",
+			"-sdt_period", "0.5",
+			"-pcr_period", "20",
+		)
+	} else {
+		args = append(args,
+			"-mpegts_flags", "+resend_headers",
+			"-pat_period", "0.2",
+		)
+	}
+
+	return append(args, "pipe:1")
+}
+
+func appendFFmpegHTTPArgs(args []string, playlist Playlist) []string {
+	if len(Settings.UserAgent) != 0 {
+		args = append(args, "-user_agent", Settings.UserAgent)
+	}
+
+	if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+		args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+	}
+
+	var headers string
+	if len(playlist.HttpUserReferer) != 0 {
+		headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
+	}
+	if len(playlist.HttpUserOrigin) != 0 {
+		headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
+	}
+	if headers != "" {
+		args = append(args, "-headers", headers)
+	}
+
+	return args
+}
+
 func setThirdPartyStreamError(playlistID string, stream ThisStream, err error) {
 	if c, ok := BufferClients.Load(playlistID + stream.MD5); ok {
 		clients := c.(ClientConnection)
@@ -314,6 +552,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
+	startupTimeoutTicks := int(thirdPartyStartupTimeout() / (100 * time.Millisecond))
 
 	// Check whether the playlist is already in use
 	Lock.Lock()
@@ -344,22 +583,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 		}
 
-		var playListBuffer string
-		systemMutex.Lock()
-		playListInterface := Settings.Files.M3U[playlistID]
-		if playListInterface == nil {
-			playListInterface = Settings.Files.HDHR[playlistID]
-		}
-		if playListMap, ok := playListInterface.(map[string]interface{}); ok {
-			if buffer, ok := playListMap["buffer"].(string); ok {
-				playListBuffer = buffer
-			} else {
-				playListBuffer = "-"
-			}
-		}
-		systemMutex.Unlock()
-
-		playlist.Buffer = playListBuffer
+		playlist.Buffer, _ = getPlaylistBuffer(playlistID)
 
 		playlist.Tuner = getTuner(playlistID, playlistType)
 
@@ -524,9 +748,9 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 		BufferInformation.Store(playlistID, playlist)
 		Lock.Unlock()
 
-		switch playlist.Buffer {
+		switch effectivePlaylistBuffer(playlist.Buffer) {
 
-		case "ffmpeg", "vlc":
+		case "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe":
 			go thirdPartyBuffer(streamID, playlistID, false, 0)
 
 		default:
@@ -563,7 +787,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 						var clients = c.(ClientConnection)
 
-						if clients.Error != nil || (timeOut > 200 && (playlist.Streams[streamID].BackupChannel1 == nil && playlist.Streams[streamID].BackupChannel2 == nil && playlist.Streams[streamID].BackupChannel3 == nil)) {
+						if clients.Error != nil || (timeOut > startupTimeoutTicks && (playlist.Streams[streamID].BackupChannel1 == nil && playlist.Streams[streamID].BackupChannel2 == nil && playlist.Streams[streamID].BackupChannel3 == nil)) {
 							killClientConnection(streamID, stream.PlaylistID, false)
 							return
 						}
@@ -1172,27 +1396,14 @@ func switchBandwidth(stream *ThisStream) (err error) {
 
 func getTuner(id, playlistType string) (tuner int) {
 
-	var playListBuffer string
-	systemMutex.Lock()
-	playListInterface := Settings.Files.M3U[id]
-	if playListInterface == nil {
-		playListInterface = Settings.Files.HDHR[id]
-	}
-	if playListMap, ok := playListInterface.(map[string]interface{}); ok {
-		if buffer, ok := playListMap["buffer"].(string); ok {
-			playListBuffer = buffer
-		} else {
-			playListBuffer = "-"
-		}
-	}
-	systemMutex.Unlock()
+	playListBuffer, _ := getPlaylistBuffer(id)
 
 	switch playListBuffer {
 
 	case "-":
 		tuner = Settings.Tuner
 
-	case "threadfin", "ffmpeg", "vlc":
+	case "threadfin", "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe":
 
 		i, err := strconv.Atoi(getProviderParameter(id, playlistType, "tuner"))
 		if err == nil {

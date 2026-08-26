@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -73,36 +71,15 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 			return
 		}
 
-		var cmd = exec.Command(engine.Path, args...)
-		// Set this explicitly to avoid issues with VLC
-		cmd.Env = append(os.Environ(), "DISPLAY=:0")
-
-		debug = fmt.Sprintf("BUFFER DEBUG: %s:%s %s", engine.BufferType, engine.Path, args)
+		debug = fmt.Sprintf("BUFFER DEBUG: %s:%s %s", engine.BufferType, engine.Path, RedactCommandArgs(args))
 		showDebug(debug, 1)
-
-		// Byte data from the process
-		stdOut, err := cmd.StdoutPipe()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
-			return
-		}
-
-		// Log data from the process
-		logOut, err := cmd.StderrPipe()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
-			return
-		}
 
 		if !stream.Status {
 			showInfo(engine.BufferType + ":Processing data")
 		}
 
-		if err := cmd.Start(); err != nil {
+		process, err := StartThirdPartyProcess(engine.Path, args)
+		if err != nil {
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
 			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
@@ -112,7 +89,7 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 		go func() {
 
 			// Display log data from the process in debug mode 1.
-			scanner := bufio.NewScanner(logOut)
+			scanner := bufio.NewScanner(process.Stderr())
 			scanner.Split(bufio.ScanLines)
 
 			for scanner.Scan() {
@@ -136,16 +113,17 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 			ShowError(err, 0)
 			killClientConnection(streamID, playlistID, false)
 			addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
-			terminateProcessGracefully(cmd)
+			process.Terminate()
 			return
 		}
 		defer segmentWriter.Close()
 
 		buffer := make([]byte, 1024*4)
 
-		reader := bufio.NewReader(stdOut)
+		reader := bufio.NewReader(process.Stdout())
 
 		t := make(chan int)
+		startupTimeout := int(thirdPartyStartupTimeout().Seconds())
 
 		go func() {
 
@@ -173,12 +151,12 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 
 			select {
 			case timeout := <-t:
-				if timeout >= 20 && segmentWriter.Segment() == 1 {
+				if timeout >= startupTimeout && segmentWriter.Segment() == 1 {
 					err = errors.New("Timeout")
 					ShowError(err, 4006)
 					killClientConnection(streamID, playlistID, false)
 					addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
-					terminateProcessGracefully(cmd)
+					process.Terminate()
 					segmentWriter.Close()
 					return
 				}
@@ -193,7 +171,7 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 
 			if !clientConnection(stream) {
 				segmentWriter.Close()
-				terminateProcessGracefully(cmd)
+				process.Terminate()
 				return
 			}
 
@@ -206,7 +184,7 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 				ShowError(err, 0)
 				killClientConnection(streamID, playlistID, false)
 				addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
-				terminateProcessGracefully(cmd)
+				process.Terminate()
 				return
 			}
 
@@ -230,7 +208,7 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 					ShowError(err, 0)
 					killClientConnection(streamID, playlistID, false)
 					addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
-					terminateProcessGracefully(cmd)
+					process.Terminate()
 					return
 				}
 
@@ -238,7 +216,7 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 
 		}
 
-		terminateProcessGracefully(cmd)
+		process.Terminate()
 
 		err = errors.New(engine.BufferType + " error")
 		addThirdPartyErrorToStream(streamID, playlistID, stream, backupNumber, err)
@@ -255,13 +233,4 @@ func (ThirdPartyStreamEngine) Run(streamID int, playlistID string, useBackup boo
 
 func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNumber int) {
 	ThirdPartyStreamEngine{}.Run(streamID, playlistID, useBackup, backupNumber)
-}
-
-func terminateProcessGracefully(cmd *exec.Cmd) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
 }

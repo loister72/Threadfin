@@ -4,12 +4,31 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 const (
 	maxThirdPartySegmentSize        = 128 * 1024
 	maxThirdPartyStartupSegmentSize = 32 * 1024
+	defaultThirdPartyStartupTimeout = 20 * time.Second
+	maxThirdPartyStartupTimeout     = 120 * time.Second
 )
+
+func thirdPartyStartupTimeout() time.Duration {
+	if Settings.BufferTimeout <= 0 {
+		return defaultThirdPartyStartupTimeout
+	}
+
+	timeout := time.Duration(Settings.BufferTimeout * float64(time.Second))
+	if timeout < time.Second {
+		return time.Second
+	}
+	if timeout > maxThirdPartyStartupTimeout {
+		return maxThirdPartyStartupTimeout
+	}
+
+	return timeout
+}
 
 type ThirdPartySegmentWriter struct {
 	folder       string

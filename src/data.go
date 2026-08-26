@@ -168,9 +168,9 @@ func updateServerSettings(request RequestStruct) (settings SettingsStruct, err e
 		Settings.VLCOptions = System.VLC.DefaultOptions
 	}
 
-	switch Settings.Buffer {
+	switch normalizePlaylistBuffer(Settings.Buffer) {
 
-	case "ffmpeg":
+	case "ffmpeg", "hdhr-remux", "hdhr-safe":
 
 		if len(Settings.FFmpegPath) == 0 {
 			err = errors.New(getErrMsg(2020))
@@ -291,6 +291,7 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 			// Neue Providerdatei
 			dataID = indicator + randomString(19)
 			data.(map[string]interface{})["new"] = true
+			normalizeProviderBufferSave(data.(map[string]interface{}))
 			filesMap[dataID] = data
 
 		} else {
@@ -300,6 +301,7 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 
 				var oldData = filesMap[dataID].(map[string]interface{})
 				oldData[key] = value
+				normalizeProviderBufferSave(oldData)
 
 			}
 

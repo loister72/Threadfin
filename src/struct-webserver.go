@@ -49,7 +49,7 @@ type RequestStruct struct {
 		SchemeXML                *string   `json:"scheme.xml,omitempty"`
 		StoreBufferInRAM         *bool     `json:"storeBufferInRAM,omitempty"`
 		ForceHttps               *bool     `json:"forceHttps,omitempty"`
-        ExcludeStreamsHttps      *bool     `json:"excludeStreamsHttps,omitempty"`
+		ExcludeStreamsHttps      *bool     `json:"excludeStreamsHttps,omitempty"`
 		HttpsPort                *int      `json:"httpsPort,omitempty"`
 		HttpsThreadfinDomain     *string   `json:"httpsThreadfinDomain,omitempty"`
 		HttpThreadfinDomain      *string   `json:"httpThreadfinDomain,omitempty"`
@@ -160,18 +160,19 @@ type APIRequestStruct struct {
 
 // APIResponseStruct : Antwort an den Client (API)
 type APIResponseStruct struct {
-	EpgSource        string `json:"epg.source,omitempty"`
-	Error            string `json:"err,omitempty"`
-	Status           bool   `json:"status,required"`
-	StreamsActive    int64  `json:"streams.active,omitempty"`
-	StreamsAll       int64  `json:"streams.all,omitempty"`
-	StreamsXepg      int64  `json:"streams.xepg,omitempty"`
-	Token            string `json:"token,omitempty"`
-	URLDvr           string `json:"url.dvr,omitempty"`
-	URLM3U           string `json:"url.m3u,omitempty"`
-	URLXepg          string `json:"url.xepg,omitempty"`
-	VersionAPI       string `json:"version.api,omitempty"`
-	VersionThreadfin string `json:"version.threadfin,omitempty"`
+	EpgSource        string                `json:"epg.source,omitempty"`
+	Error            string                `json:"err,omitempty"`
+	GuidePreflight   *GuidePreflightReport `json:"guide.preflight,omitempty"`
+	Status           bool                  `json:"status,required"`
+	StreamsActive    int64                 `json:"streams.active,omitempty"`
+	StreamsAll       int64                 `json:"streams.all,omitempty"`
+	StreamsXepg      int64                 `json:"streams.xepg,omitempty"`
+	Token            string                `json:"token,omitempty"`
+	URLDvr           string                `json:"url.dvr,omitempty"`
+	URLM3U           string                `json:"url.m3u,omitempty"`
+	URLXepg          string                `json:"url.xepg,omitempty"`
+	VersionAPI       string                `json:"version.api,omitempty"`
+	VersionThreadfin string                `json:"version.threadfin,omitempty"`
 }
 
 // WebScreenLogStruct : Logs werden im RAM gespeichert und für das Webinterface bereitgestellt

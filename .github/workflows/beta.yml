@@ -10,17 +10,19 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
-      - name: Check out code into the Go module directory
-        uses: actions/checkout@v3
+      - name: Check out code
+        uses: actions/checkout@v4
         with:
           ref: beta
 
-      - name: Set up and Build
-        uses: actions/setup-go@v3
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: 1.18
-        id: go
-      - run: |
-         go mod tidy && go mod vendor
-         echo "Building Linux"
-         env GOOS=linux GOARCH=amd64 go build -o dist/Threadfin_linux_amd64
+          go-version: "1.23"
+          cache: true
+
+      - name: Build Linux
+        run: |
+          mkdir -p dist
+          echo "Building Linux"
+          env GOOS=linux GOARCH=amd64 go build -mod=mod -o dist/Threadfin_linux_amd64

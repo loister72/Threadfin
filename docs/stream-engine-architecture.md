@@ -45,6 +45,33 @@ play has been verified. The client contract should be "HTTP response containing
 continuous MPEG-TS bytes"; Threadfin can buffer before response start, but should
 avoid creating avoidable stalls between internal chunks.
 
+## HDHomeRun Profiles
+
+`hdhr-remux` is the default Plex compatibility target. It is a structured FFmpeg
+profile that exposes the stream as continuous MPEG-TS, copies the first video
+stream, normalizes the first audio stream to AAC stereo 48 kHz, regenerates
+timestamps, and re-sends MPEG-TS program tables.
+
+`hdhr-safe` is the stricter compatibility target for picky clients such as Plex
+on Android TV. It keeps the same audio/timestamp normalization but uses a deeper
+probe window and repeats PAT/PMT more aggressively so a client joining at stream
+start sees tuner-like headers quickly.
+
+The old `ffmpeg` setting remains an advanced raw-command override. Product code
+should prefer named profiles so behavior is deterministic and testable.
+
+## Guide Preflight
+
+Automation can call the API with `{"cmd":"guide.preflight"}` to inspect the
+loaded XEPG state before handing the lineup to Plex. The report is read-only and
+flags active visible channels with duplicate guide numbers, duplicate canonical
+identities, missing XMLTV mappings, and missing channel logos.
+
+The canonical identity currently preserves existing Threadfin behavior:
+`URL + tvg-id + source` when `tvg-id` exists, otherwise `URL + source`. That
+keeps existing channel state stable while giving the codebase one place to
+improve identity matching later.
+
 ## FFmpeg Profile Direction
 
 The remux profile should be assembled as structured arguments, not one opaque

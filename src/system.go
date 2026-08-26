@@ -199,6 +199,8 @@ func loadSettings() (settings SettingsStruct, err error) {
 		settings.VLCPath = searchFileInOS("cvlc")
 	}
 
+	normalizeProviderBufferSettings(&settings)
+
 	// Initialze virutal filesystem for the Buffer
 	initBufferVFS()
 
@@ -210,11 +212,12 @@ func loadSettings() (settings SettingsStruct, err error) {
 	}
 
 	// Warung wenn FFmpeg nicht gefunden wurde
-	if len(Settings.FFmpegPath) == 0 && Settings.Buffer == "ffmpeg" {
+	switch normalizePlaylistBuffer(Settings.Buffer) {
+	case "ffmpeg", "hdhr-remux", "hdhr-safe":
 		showWarning(2020)
 	}
 
-	if len(Settings.VLCPath) == 0 && Settings.Buffer == "vlc" {
+	if len(Settings.VLCPath) == 0 && normalizePlaylistBuffer(Settings.Buffer) == "vlc" {
 		showWarning(2021)
 	}
 

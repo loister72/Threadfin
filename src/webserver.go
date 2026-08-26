@@ -174,25 +174,12 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var playListBuffer string
-	systemMutex.Lock()
-	playListInterface := Settings.Files.M3U[streamInfo.PlaylistID]
-	if playListInterface == nil {
-		playListInterface = Settings.Files.HDHR[streamInfo.PlaylistID]
-	}
-
-	if playListMap, ok := playListInterface.(map[string]interface{}); ok {
-		if bufferValue, exists := playListMap["buffer"]; exists && bufferValue != nil {
-			if buffer, ok := bufferValue.(string); ok {
-				playListBuffer = buffer
-			}
-		}
-	}
-	systemMutex.Unlock()
+	playListBuffer, playListBufferSource := getPlaylistBuffer(streamInfo.PlaylistID)
+	playListBufferLog := formatPlaylistBufferLog(playListBuffer, playListBufferSource)
 
 	switch playListBuffer {
 	case "-":
-		showInfo(fmt.Sprintf("Buffer:false [%s]", playListBuffer))
+		showInfo(fmt.Sprintf("Buffer:false [%s]", playListBufferLog))
 	case "threadfin":
 		if strings.Index(streamInfo.URL, "rtsp://") != -1 || strings.Index(streamInfo.URL, "rtp://") != -1 {
 			err = errors.New("RTSP and RTP streams are not supported")
@@ -201,9 +188,9 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, streamInfo.URL, 302)
 			return
 		}
-		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBuffer))
+		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBufferLog))
 	default:
-		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBuffer))
+		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBufferLog))
 	}
 
 	showInfo(fmt.Sprintf("Channel Name:%s", streamInfo.Name))
@@ -984,6 +971,10 @@ func API(w http.ResponseWriter, r *http.Request) {
 		response.URLDvr = System.Domain
 		response.URLM3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/threadfin.m3u"
 		response.URLXepg = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/threadfin.xml"
+
+	case "guide.preflight":
+		report := BuildGuidePreflightReport(Data.XEPG.Channels, Data.XMLTV.Mapping)
+		response.GuidePreflight = &report
 
 	case "update.m3u":
 		err = getProviderData("m3u", "")
