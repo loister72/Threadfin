@@ -341,6 +341,31 @@ func TestThirdPartyStartupTimeoutUsesConfiguredSeconds(t *testing.T) {
 	}
 }
 
+func TestShouldRestartThirdPartyProcessOnlyAfterActivePrimaryEOF(t *testing.T) {
+	if shouldRestartThirdPartyProcess(ThisStream{Status: false}, 0, 0) {
+		t.Fatal("inactive startup failure should not restart")
+	}
+
+	if !shouldRestartThirdPartyProcess(ThisStream{Status: true}, 0, 0) {
+		t.Fatal("active stream without backups should restart")
+	}
+}
+
+func TestShouldRestartThirdPartyProcessHonorsLimitsAndBackupFailover(t *testing.T) {
+	stream := ThisStream{
+		Status:         true,
+		BackupChannel1: &BackupStream{URL: "http://backup.example.test/stream"},
+	}
+
+	if shouldRestartThirdPartyProcess(stream, 0, 0) {
+		t.Fatal("stream with backup should use backup failover instead of primary restart")
+	}
+
+	if shouldRestartThirdPartyProcess(ThisStream{Status: true}, maxThirdPartyProcessRestarts, 0) {
+		t.Fatal("restart limit should stop additional retries")
+	}
+}
+
 func TestThirdPartySegmentWriterRotatesSegments(t *testing.T) {
 	initBufferVFS()
 
