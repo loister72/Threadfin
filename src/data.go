@@ -1,7 +1,6 @@
 package src
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -145,7 +144,7 @@ func updateServerSettings(request RequestStruct) (settings SettingsStruct, err e
 	}
 
 	// Einstellungen aktualisieren
-	err = json.Unmarshal([]byte(mapToJSON(oldSettings)), &Settings)
+	err = remarshalJSON(oldSettings, &Settings)
 	if err != nil {
 		return
 	}
@@ -169,9 +168,9 @@ func updateServerSettings(request RequestStruct) (settings SettingsStruct, err e
 		Settings.VLCOptions = System.VLC.DefaultOptions
 	}
 
-	switch Settings.Buffer {
+	switch normalizePlaylistBuffer(Settings.Buffer) {
 
-	case "ffmpeg":
+	case "ffmpeg", "hdhr-remux", "hdhr-safe":
 
 		if len(Settings.FFmpegPath) == 0 {
 			err = errors.New(getErrMsg(2020))
@@ -292,6 +291,7 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 			// Neue Providerdatei
 			dataID = indicator + randomString(19)
 			data.(map[string]interface{})["new"] = true
+			normalizeProviderBufferSave(data.(map[string]interface{}))
 			filesMap[dataID] = data
 
 		} else {
@@ -301,6 +301,7 @@ func saveFiles(request RequestStruct, fileType string) (err error) {
 
 				var oldData = filesMap[dataID].(map[string]interface{})
 				oldData[key] = value
+				normalizeProviderBufferSave(oldData)
 
 			}
 
@@ -492,8 +493,6 @@ func saveFilter(request RequestStruct) (settings SettingsStruct, err error) {
 	}
 
 	settings = Settings
-
-
 	err = buildDatabaseDVR()
 	if err != nil {
 		return
@@ -516,7 +515,7 @@ func saveXEpgMapping(request RequestStruct) (err error) {
 		ShowError(err, 0)
 	}
 
-	err = json.Unmarshal([]byte(mapToJSON(request.EpgMapping)), &tmp)
+	err = remarshalJSON(request.EpgMapping, &tmp)
 	if err != nil {
 		return
 	}
@@ -759,7 +758,7 @@ func createFilterRules() (err error) {
 
 		var exclude, include string
 
-		err = json.Unmarshal([]byte(mapToJSON(f)), &filter)
+		err = remarshalJSON(f, &filter)
 		if err != nil {
 			return
 		}

@@ -117,7 +117,8 @@ func New(path, cacheURL string, caching bool) (c *Cache, err error) {
 			}
 
 			src_filtered := strings.Split(src, "?")
-			filename = fmt.Sprintf("%s%s%s", c.path, strToMD5(src_filtered[0]), filepath.Ext(src_filtered[0]))
+			cachedName := fmt.Sprintf("%s%s", strToMD5(src_filtered[0]), filepath.Ext(src_filtered[0]))
+			filename = c.path + cachedName
 
 			file, err := os.Create(filename)
 			if err != nil {
@@ -131,12 +132,11 @@ func New(path, cacheURL string, caching bool) (c *Cache, err error) {
 				continue
 			}
 
-			u, err := url.Parse(src_filtered[0])
-			if err == nil {
-				c.images[fmt.Sprintf("%s%s", strToMD5(src_filtered[0]), filepath.Ext(u.Path))] = c.cacheURL + filename
+			if _, err := url.Parse(src_filtered[0]); err == nil {
+				c.images[cachedName] = c.cacheURL + cachedName
 			}
 
-			queue = append(queue, src_filtered[0])
+			queue = append(queue, src)
 
 		}
 

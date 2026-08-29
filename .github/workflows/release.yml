@@ -27,28 +27,26 @@ jobs:
 
       - name: Build Binaries
         run: |
-          go mod tidy && go mod vendor
-          
           # Build all binaries in parallel
           echo "Building all platforms in parallel"
           
           # Linux builds
-          env GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/Threadfin_linux_arm64 &
-          env GOOS=linux GOARCH=arm go build -ldflags="-s -w" -o dist/Threadfin_linux_arm &
-          env GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_linux_amd64 &
+          env GOOS=linux GOARCH=arm64 go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_linux_arm64 &
+          env GOOS=linux GOARCH=arm go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_linux_arm &
+          env GOOS=linux GOARCH=amd64 go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_linux_amd64 &
           # Linux (amd64) build compatible with older glibc (e.g., Debian 11 / glibc 2.31)
-          env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags netgo -ldflags="-s -w" -o dist/Threadfin_linux_amd64_glibc_2.31_compat &
+          env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod -tags netgo -ldflags="-s -w" -o dist/Threadfin_linux_amd64_glibc_2.31_compat &
           
           # FreeBSD builds
-          env GOOS=freebsd GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_freebsd_amd64 &
-          env GOOS=freebsd GOARCH=arm go build -ldflags="-s -w" -o dist/Threadfin_freebsd_arm &
+          env GOOS=freebsd GOARCH=amd64 go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_freebsd_amd64 &
+          env GOOS=freebsd GOARCH=arm go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_freebsd_arm &
           
           # macOS builds
-          env GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/Threadfin_darwin_arm64 &
-          env GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_darwin_amd64 &
+          env GOOS=darwin GOARCH=arm64 go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_darwin_arm64 &
+          env GOOS=darwin GOARCH=amd64 go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_darwin_amd64 &
           
           # Windows build
-          env GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/Threadfin_windows_amd64.exe &
+          env GOOS=windows GOARCH=amd64 go build -mod=mod -ldflags="-s -w" -o dist/Threadfin_windows_amd64.exe &
           
           # Wait for all background jobs to finish
           wait

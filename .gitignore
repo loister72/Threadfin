@@ -4,3 +4,5 @@ vendor/
 .DS_Store
 threadfin.exe
 .idea/**
+__pycache__/
+*.py[cod]

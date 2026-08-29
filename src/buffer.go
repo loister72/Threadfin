@@ -6,20 +6,16 @@ package src
 */
 
 import (
-	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/avfs/avfs/vfs/memfs"
@@ -136,22 +132,428 @@ func createStreamID(stream map[int]ThisStream, ip, userAgent string) (streamID i
 	return
 }
 
-func bufferingStream(playlistID string, streamingURL string, backupStream1 *BackupStream, backupStream2 *BackupStream, backupStream3 *BackupStream, channelName string, w http.ResponseWriter, r *http.Request) {
+func redactStreamURL(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
 
-	time.Sleep(time.Duration(Settings.BufferTimeout) * time.Millisecond)
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<redacted>"
+	}
+
+	u.RawQuery = ""
+	u.User = nil
+
+	return u.String()
+}
+
+type thirdPartyEngineConfig struct {
+	BufferType string
+	Options    string
+	Path       string
+	URL        string
+}
+
+const playlistBufferDefault = "default"
+
+func normalizePlaylistBuffer(buffer interface{}) string {
+	value, ok := buffer.(string)
+	if !ok {
+		return playlistBufferDefault
+	}
+
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "global", "inherit":
+		return playlistBufferDefault
+	case playlistBufferDefault, "-", "threadfin", "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe":
+		return value
+	default:
+		return playlistBufferDefault
+	}
+}
+
+func effectivePlaylistBuffer(buffer string) string {
+	if normalizePlaylistBuffer(buffer) == playlistBufferDefault {
+		return normalizePlaylistBuffer(Settings.Buffer)
+	}
+	return normalizePlaylistBuffer(buffer)
+}
+
+func getPlaylistBuffer(playlistID string) (buffer string, source string) {
+	buffer = playlistBufferDefault
+	source = "global"
+
+	systemMutex.Lock()
+	defer systemMutex.Unlock()
+
+	playListInterface := Settings.Files.M3U[playlistID]
+	if playListInterface == nil {
+		playListInterface = Settings.Files.HDHR[playlistID]
+	}
+
+	if playListMap, ok := playListInterface.(map[string]interface{}); ok {
+		providerBuffer := normalizePlaylistBuffer(playListMap["buffer"])
+		if providerBuffer != playlistBufferDefault {
+			return providerBuffer, "provider"
+		}
+	}
+
+	return effectivePlaylistBuffer(playlistBufferDefault), source
+}
+
+func formatPlaylistBufferLog(buffer string, source string) string {
+	if source == "provider" && buffer != normalizePlaylistBuffer(Settings.Buffer) {
+		return fmt.Sprintf("%s provider override, global=%s", buffer, normalizePlaylistBuffer(Settings.Buffer))
+	}
+	return fmt.Sprintf("%s %s", buffer, source)
+}
+
+func normalizeProviderBufferSettings(settings *SettingsStruct) bool {
+	changed := false
+
+	normalizeFiles := func(files map[string]interface{}) {
+		for providerID, provider := range files {
+			providerMap, ok := provider.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			rawBuffer, hasBuffer := providerMap["buffer"]
+			buffer := normalizePlaylistBuffer(rawBuffer)
+			override, _ := providerMap["buffer.override"].(bool)
+
+			if !hasBuffer || buffer == playlistBufferDefault || buffer == normalizePlaylistBuffer(settings.Buffer) {
+				if providerMap["buffer"] != playlistBufferDefault {
+					providerMap["buffer"] = playlistBufferDefault
+					changed = true
+				}
+				if _, ok := providerMap["buffer.override"]; ok {
+					delete(providerMap, "buffer.override")
+					changed = true
+				}
+				files[providerID] = providerMap
+				continue
+			}
+
+			if buffer == "-" || override {
+				if providerMap["buffer"] != buffer {
+					providerMap["buffer"] = buffer
+					changed = true
+				}
+				files[providerID] = providerMap
+				continue
+			}
+
+			providerMap["buffer"] = playlistBufferDefault
+			delete(providerMap, "buffer.override")
+			files[providerID] = providerMap
+			changed = true
+		}
+	}
+
+	normalizeFiles(settings.Files.M3U)
+	normalizeFiles(settings.Files.HDHR)
+
+	return changed
+}
+
+func normalizeProviderBufferSave(provider map[string]interface{}) {
+	rawBuffer, ok := provider["buffer"]
+	if !ok {
+		return
+	}
+
+	buffer := normalizePlaylistBuffer(rawBuffer)
+	if buffer == playlistBufferDefault || buffer == normalizePlaylistBuffer(Settings.Buffer) {
+		provider["buffer"] = playlistBufferDefault
+		delete(provider, "buffer.override")
+		return
+	}
+
+	provider["buffer"] = buffer
+	if buffer != "-" {
+		provider["buffer.override"] = true
+	}
+}
+
+func selectThirdPartyStreamURL(stream ThisStream, useBackup bool, backupNumber int) (streamURL string, selectedBackup int) {
+	streamURL = stream.URL
+
+	if !useBackup {
+		return streamURL, 0
+	}
+
+	switch backupNumber {
+	case 1:
+		if stream.BackupChannel1 != nil {
+			return stream.BackupChannel1.URL, 1
+		}
+	case 2:
+		if stream.BackupChannel2 != nil {
+			return stream.BackupChannel2.URL, 2
+		}
+	case 3:
+		if stream.BackupChannel3 != nil {
+			return stream.BackupChannel3.URL, 3
+		}
+	}
+
+	return streamURL, 0
+}
+
+func nextBackupNumber(stream ThisStream, currentBackup int) (int, bool) {
+	for backupNumber := currentBackup + 1; backupNumber <= 3; backupNumber++ {
+		switch backupNumber {
+		case 1:
+			if stream.BackupChannel1 != nil {
+				return backupNumber, true
+			}
+		case 2:
+			if stream.BackupChannel2 != nil {
+				return backupNumber, true
+			}
+		case 3:
+			if stream.BackupChannel3 != nil {
+				return backupNumber, true
+			}
+		}
+	}
+
+	return 0, false
+}
+
+func resolveThirdPartyEngine(playlist Playlist, streamURL string) (config thirdPartyEngineConfig, forcedHTTP bool, supported bool) {
+	buffer := effectivePlaylistBuffer(playlist.Buffer)
+	config = thirdPartyEngineConfig{
+		BufferType: strings.ToUpper(buffer),
+		URL:        streamURL,
+	}
+
+	switch buffer {
+	case "ffmpeg":
+		config.Path = Settings.FFmpegPath
+		config.Options = Settings.FFmpegOptions
+		if Settings.FFmpegForceHttp {
+			config.URL = strings.Replace(config.URL, "https://", "http://", -1)
+			return config, true, true
+		}
+	case "hdhr-remux", "hdhr-safe":
+		config.BufferType = strings.ToUpper(buffer)
+		config.Path = Settings.FFmpegPath
+		config.Options = ""
+		if Settings.FFmpegForceHttp {
+			config.URL = strings.Replace(config.URL, "https://", "http://", -1)
+			return config, true, true
+		}
+	case "vlc":
+		config.Path = Settings.VLCPath
+		config.Options = Settings.VLCOptions
+	default:
+		return config, false, false
+	}
+
+	return config, false, true
+}
+
+func buildThirdPartyArgs(bufferType, options, streamURL string, playlist Playlist) ([]string, error) {
+	switch bufferType {
+	case "HDHR-REMUX":
+		return buildHDHRRemuxArgs(streamURL, playlist, false), nil
+	case "HDHR-SAFE":
+		return buildHDHRRemuxArgs(streamURL, playlist, true), nil
+	}
+
+	parsedOptions, err := splitCommandLine(options)
+	if err != nil {
+		return nil, err
+	}
+
+	var args []string
+
+	for i, a := range parsedOptions {
+		switch bufferType {
+		case "FFMPEG":
+			a = strings.Replace(a, "[URL]", streamURL, -1)
+			if i == 0 {
+				if len(Settings.UserAgent) != 0 {
+					args = []string{"-user_agent", Settings.UserAgent}
+				}
+
+				if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+					args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+				}
+
+				var headers string
+				if len(playlist.HttpUserReferer) != 0 {
+					headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
+				}
+				if len(playlist.HttpUserOrigin) != 0 {
+					headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
+				}
+				if headers != "" {
+					args = append(args, "-headers", headers)
+				}
+			}
+
+			args = append(args, a)
+
+		case "VLC":
+			if a == "[URL]" {
+				args = append(args, streamURL)
+
+				if len(Settings.UserAgent) != 0 {
+					args = append(args, fmt.Sprintf(":http-user-agent=%s", Settings.UserAgent))
+				}
+
+				if len(playlist.HttpUserReferer) != 0 {
+					args = append(args, fmt.Sprintf(":http-referrer=%s", playlist.HttpUserReferer))
+				}
+
+				if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+					args = append(args, fmt.Sprintf(":http-proxy=%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+				}
+			} else {
+				args = append(args, a)
+			}
+		}
+	}
+
+	return args, nil
+}
+
+func buildHDHRRemuxArgs(streamURL string, playlist Playlist, safe bool) []string {
+	args := []string{
+		"-nostdin",
+		"-hide_banner",
+		"-loglevel",
+		"warning",
+		"-reconnect",
+		"1",
+		"-reconnect_streamed",
+		"1",
+		"-reconnect_at_eof",
+		"1",
+		"-reconnect_on_network_error",
+		"1",
+		"-reconnect_on_http_error",
+		"4xx,5xx",
+	}
+
+	if safe {
+		args = append(args,
+			"-reconnect_delay_max", "10",
+			"-rw_timeout", "30000000",
+			"-analyzeduration", "5000000",
+			"-probesize", "5000000",
+		)
+	} else {
+		args = append(args,
+			"-reconnect_delay_max", "8",
+			"-rw_timeout", "25000000",
+			"-analyzeduration", "2000000",
+			"-probesize", "2000000",
+		)
+	}
+
+	args = append(args,
+		"-fflags", "+genpts+discardcorrupt",
+		"-err_detect", "ignore_err",
+	)
+
+	args = appendFFmpegHTTPArgs(args, playlist)
+
+	args = append(args,
+		"-i", streamURL,
+		"-map", "0:v:0?",
+		"-map", "0:a:0?",
+		"-sn",
+		"-c:v", "copy",
+		"-c:a", "aac",
+		"-ar", "48000",
+		"-ac", "2",
+		"-b:a", "128k",
+		"-af", "aresample=async=1:first_pts=0",
+		"-avoid_negative_ts", "make_zero",
+		"-muxpreload", "0",
+		"-muxdelay", "0",
+		"-flush_packets", "1",
+		"-f", "mpegts",
+	)
+
+	if safe {
+		args = append(args,
+			"-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
+			"-pat_period", "0.1",
+			"-sdt_period", "0.5",
+			"-pcr_period", "20",
+		)
+	} else {
+		args = append(args,
+			"-mpegts_flags", "+resend_headers",
+			"-pat_period", "0.2",
+		)
+	}
+
+	return append(args, "pipe:1")
+}
+
+func appendFFmpegHTTPArgs(args []string, playlist Playlist) []string {
+	if len(Settings.UserAgent) != 0 {
+		args = append(args, "-user_agent", Settings.UserAgent)
+	}
+
+	if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
+		args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
+	}
+
+	var headers string
+	if len(playlist.HttpUserReferer) != 0 {
+		headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
+	}
+	if len(playlist.HttpUserOrigin) != 0 {
+		headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
+	}
+	if headers != "" {
+		args = append(args, "-headers", headers)
+	}
+
+	return args
+}
+
+func setThirdPartyStreamError(playlistID string, stream ThisStream, err error) {
+	if c, ok := BufferClients.Load(playlistID + stream.MD5); ok {
+		clients := c.(ClientConnection)
+		clients.Error = err
+		BufferClients.Store(playlistID+stream.MD5, clients)
+	}
+}
+
+func addThirdPartyErrorToStream(streamID int, playlistID string, stream ThisStream, backupNumber int, err error) {
+	if nextBackup, ok := nextBackupNumber(stream, backupNumber); ok {
+		thirdPartyBuffer(streamID, playlistID, true, nextBackup)
+		return
+	}
+
+	setThirdPartyStreamError(playlistID, stream, err)
+}
+
+func bufferingStream(playlistID string, streamingURL string, backupStream1 *BackupStream, backupStream2 *BackupStream, backupStream3 *BackupStream, channelName string, w http.ResponseWriter, r *http.Request) {
 
 	var playlist Playlist
 	var client ThisClient
 	var stream ThisStream
-	var streaming = false
 	var streamID int
 	var debug string
 	var timeOut = 0
 	var newStream = true
 
-	//w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Connection", "close")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	startupTimeoutTicks := int(thirdPartyStartupTimeout() / (100 * time.Millisecond))
 
 	// Check whether the playlist is already in use
 	Lock.Lock()
@@ -182,22 +584,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 		}
 
-		var playListBuffer string
-		systemMutex.Lock()
-		playListInterface := Settings.Files.M3U[playlistID]
-		if playListInterface == nil {
-			playListInterface = Settings.Files.HDHR[playlistID]
-		}
-		if playListMap, ok := playListInterface.(map[string]interface{}); ok {
-			if buffer, ok := playListMap["buffer"].(string); ok {
-				playListBuffer = buffer
-			} else {
-				playListBuffer = "-"
-			}
-		}
-		systemMutex.Unlock()
-
-		playlist.Buffer = playListBuffer
+		playlist.Buffer, _ = getPlaylistBuffer(playlistID)
 
 		playlist.Tuner = getTuner(playlistID, playlistType)
 
@@ -215,6 +602,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 		client.Connection += 1
 
 		stream.URL = streamingURL
+		stream.ClientID = fmt.Sprintf("%s-%s", getClientIP(r), r.UserAgent())
 		stream.BackupChannel1 = backupStream1
 		stream.BackupChannel2 = backupStream2
 		stream.BackupChannel3 = backupStream3
@@ -297,13 +685,15 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 					content := GetHTMLString(value.(string))
 
-					w.WriteHeader(200)
 					w.Header().Set("Content-type", "video/mpeg")
-					w.Header().Set("Content-Length:", "0")
+					w.WriteHeader(200)
 
 					for i := 1; i < 60; i++ {
 						_ = i
 						w.Write([]byte(content))
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
+						}
 						time.Sleep(time.Duration(500) * time.Millisecond)
 					}
 
@@ -322,6 +712,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 			client.Connection = 1
 			stream.URL = streamingURL
+			stream.ClientID = fmt.Sprintf("%s-%s", getClientIP(r), r.UserAgent())
 			stream.ChannelName = channelName
 			stream.Status = false
 			stream.BackupChannel1 = backupStream1
@@ -358,9 +749,9 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 		BufferInformation.Store(playlistID, playlist)
 		Lock.Unlock()
 
-		switch playlist.Buffer {
+		switch effectivePlaylistBuffer(playlist.Buffer) {
 
-		case "ffmpeg", "vlc":
+		case "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe":
 			go thirdPartyBuffer(streamID, playlistID, false, 0)
 
 		default:
@@ -376,6 +767,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 	}
 
+	w.Header().Set("Content-type", "video/mp2t")
 	w.WriteHeader(200)
 
 	for { //Loop 1: Wait until the first segment has been downloaded through the buffer
@@ -396,7 +788,7 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 
 						var clients = c.(ClientConnection)
 
-						if clients.Error != nil || (timeOut > 200 && (playlist.Streams[streamID].BackupChannel1 == nil && playlist.Streams[streamID].BackupChannel2 == nil && playlist.Streams[streamID].BackupChannel3 == nil)) {
+						if clients.Error != nil || (timeOut > startupTimeoutTicks && (playlist.Streams[streamID].BackupChannel1 == nil && playlist.Streams[streamID].BackupChannel2 == nil && playlist.Streams[streamID].BackupChannel3 == nil)) {
 							killClientConnection(streamID, stream.PlaylistID, false)
 							return
 						}
@@ -464,75 +856,36 @@ func bufferingStream(playlistID string, streamingURL string, backupStream1 *Back
 						if err != nil {
 							debug = fmt.Sprintf("Buffer Open (%s)", fileName)
 							showDebug(debug, 2)
+							killClientConnection(streamID, playlistID, false)
 							return
 						}
-						defer file.Close()
 
-						if err == nil {
+						debug = fmt.Sprintf("Buffer Status:Send to client (%s)", fileName)
+						showDebug(debug, 2)
 
-							l, err := file.Stat()
-							if err == nil {
+						if _, err := io.Copy(w, file); err != nil {
+							file.Close()
+							killClientConnection(streamID, playlistID, false)
+							return
+						}
 
-								debug = fmt.Sprintf("Buffer Status:Send to client (%s)", fileName)
-								showDebug(debug, 2)
-
-								var buffer = make([]byte, int(l.Size()))
-								_, err = file.Read(buffer)
-
-								if err == nil {
-
-									file.Seek(0, 0)
-
-									if !streaming {
-
-										contentType := http.DetectContentType(buffer)
-										_ = contentType
-										//w.Header().Set("Content-type", "video/mpeg")
-										w.Header().Set("Content-type", contentType)
-										w.Header().Set("Content-Length", "0")
-										w.Header().Set("Connection", "close")
-
-									}
-
-									/*
-									   // HDHR Header
-									   w.Header().Set("Cache-Control", "no-cache")
-									   w.Header().Set("Pragma", "no-cache")
-									   w.Header().Set("transferMode.dlna.org", "Streaming")
-									*/
-
-									_, err := w.Write(buffer)
-
-									if err != nil {
-										file.Close()
-										killClientConnection(streamID, playlistID, false)
-										return
-									}
-
-									file.Close()
-									streaming = true
-
-								}
-
-								file.Close()
-
-							}
-
-							var n = indexOfString(f, oldSegments)
-
-							if n > 20 {
-
-								var fileToRemove = stream.Folder + oldSegments[0]
-								if err = bufferVFS.RemoveAll(getPlatformFile(fileToRemove)); err != nil {
-									ShowError(err, 4007)
-								}
-								oldSegments = append(oldSegments[:0], oldSegments[0+1:]...)
-
-							}
-
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
 						}
 
 						file.Close()
+
+						var n = indexOfString(f, oldSegments)
+
+						if n > 20 {
+
+							var fileToRemove = stream.Folder + oldSegments[0]
+							if err = bufferVFS.RemoveAll(getPlatformFile(fileToRemove)); err != nil {
+								ShowError(err, 4007)
+							}
+							oldSegments = append(oldSegments[:0], oldSegments[0+1:]...)
+
+						}
 
 					}
 
@@ -571,7 +924,7 @@ func getBufTmpFiles(stream *ThisStream) (tmpFiles []string) {
 			return
 		}
 
-		if len(files) > 2 {
+		if len(files) > 1 {
 
 			for _, file := range files {
 
@@ -1018,397 +1371,16 @@ func switchBandwidth(stream *ThisStream) (err error) {
 	return
 }
 
-// Buffer with FFMPEG
-func thirdPartyBuffer(streamID int, playlistID string, useBackup bool, backupNumber int) {
-
-	if p, ok := BufferInformation.Load(playlistID); ok {
-
-		var playlist = p.(Playlist)
-		var debug, path, options, bufferType string
-		var tmpSegment = 1
-		var bufferSize = Settings.BufferSize * 1024
-		var stream = playlist.Streams[streamID]
-		var buf bytes.Buffer
-		var fileSize = 0
-		var streamStatus = make(chan bool)
-
-		var tmpFolder = playlist.Streams[streamID].Folder
-		var url = playlist.Streams[streamID].URL
-		if useBackup {
-			if backupNumber >= 1 && backupNumber <= 3 {
-				switch backupNumber {
-				case 1:
-					if stream.BackupChannel1 != nil {
-						url = stream.BackupChannel1.URL
-						showHighlight("START OF BACKUP 1 STREAM")
-						showInfo("Backup Channel 1 URL: " + url)
-					}
-				case 2:
-					if stream.BackupChannel2 != nil {
-						url = stream.BackupChannel2.URL
-						showHighlight("START OF BACKUP 2 STREAM")
-						showInfo("Backup Channel 2 URL: " + url)
-					}
-				case 3:
-					if stream.BackupChannel3 != nil {
-						url = stream.BackupChannel3.URL
-						showHighlight("START OF BACKUP 3 STREAM")
-						showInfo("Backup Channel 3 URL: " + url)
-					}
-				}
-			}
-		}
-
-		stream.Status = false
-
-		bufferType = strings.ToUpper(playlist.Buffer)
-
-		switch playlist.Buffer {
-
-		case "ffmpeg":
-
-			if Settings.FFmpegForceHttp {
-				url = strings.Replace(url, "https://", "http://", -1)
-				showInfo("Forcing URL to HTTP for FFMPEG: " + url)
-			}
-
-			path = Settings.FFmpegPath
-			options = Settings.FFmpegOptions
-
-		case "vlc":
-			path = Settings.VLCPath
-			options = Settings.VLCOptions
-
-		default:
-			return
-		}
-
-		var addErrorToStream = func(err error) {
-			if !useBackup || (useBackup && backupNumber >= 0 && backupNumber <= 3) {
-				backupNumber = backupNumber + 1
-				if stream.BackupChannel1 != nil || stream.BackupChannel2 != nil || stream.BackupChannel3 != nil {
-					thirdPartyBuffer(streamID, playlistID, true, backupNumber)
-				}
-				return
-			}
-
-			var stream = playlist.Streams[streamID]
-
-			if c, ok := BufferClients.Load(playlistID + stream.MD5); ok {
-
-				var clients = c.(ClientConnection)
-				clients.Error = err
-				BufferClients.Store(playlistID+stream.MD5, clients)
-
-			}
-
-		}
-
-		if err := bufferVFS.RemoveAll(getPlatformPath(tmpFolder)); err != nil {
-			ShowError(err, 4005)
-		}
-
-		err := checkVFSFolder(tmpFolder, bufferVFS)
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
-
-		err = checkFile(path)
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
-
-		showInfo(fmt.Sprintf("%s path:%s", bufferType, path))
-		showInfo("Streaming URL:" + url)
-
-		var tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
-
-		f, err := bufferVFS.Create(tmpFile)
-		f.Close()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
-
-		//args = strings.Replace(args, "[USER-AGENT]", Settings.UserAgent, -1)
-
-		// Set User-Agent
-		var args []string
-
-		for i, a := range strings.Split(options, " ") {
-
-			switch bufferType {
-			case "FFMPEG":
-				a = strings.Replace(a, "[URL]", url, -1)
-				if i == 0 {
-					if len(Settings.UserAgent) != 0 {
-						args = []string{"-user_agent", Settings.UserAgent}
-					}
-
-					if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
-						args = append(args, "-http_proxy", fmt.Sprintf("http://%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
-					}
-
-					var headers string
-					if len(playlist.HttpUserReferer) != 0 {
-						headers += fmt.Sprintf("Referer: %s\r\n", playlist.HttpUserReferer)
-					}
-					if len(playlist.HttpUserOrigin) != 0 {
-						headers += fmt.Sprintf("Origin: %s\r\n", playlist.HttpUserOrigin)
-					}
-					if headers != "" {
-						args = append(args, "-headers", headers)
-					}
-				}
-
-				args = append(args, a)
-
-			case "VLC":
-				if a == "[URL]" {
-					a = strings.Replace(a, "[URL]", url, -1)
-					args = append(args, a)
-
-					if len(Settings.UserAgent) != 0 {
-						args = append(args, fmt.Sprintf(":http-user-agent=%s", Settings.UserAgent))
-					}
-
-					if len(playlist.HttpUserReferer) != 0 {
-						args = append(args, fmt.Sprintf(":http-referrer=%s", playlist.HttpUserReferer))
-					}
-
-					if playlist.HttpProxyIP != "" && playlist.HttpProxyPort != "" {
-						args = append(args, fmt.Sprintf(":http-proxy=%s:%s", playlist.HttpProxyIP, playlist.HttpProxyPort))
-					}
-
-				} else {
-					args = append(args, a)
-				}
-
-			}
-
-		}
-
-		var cmd = exec.Command(path, args...)
-		// Set this explicitly to avoid issues with VLC
-		cmd.Env = append(os.Environ(), "DISPLAY=:0")
-
-		debug = fmt.Sprintf("BUFFER DEBUG: %s:%s %s", bufferType, path, args)
-		showDebug(debug, 1)
-
-		// Byte data from the process
-		stdOut, err := cmd.StdoutPipe()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
-
-		// Log data from the process
-		logOut, err := cmd.StderrPipe()
-		if err != nil {
-			ShowError(err, 0)
-			killClientConnection(streamID, playlistID, false)
-			addErrorToStream(err)
-			return
-		}
-
-		if len(buf.Bytes()) == 0 && !stream.Status {
-			showInfo(bufferType + ":Processing data")
-		}
-
-		cmd.Start()
-		defer cmd.Wait()
-
-		go func() {
-
-			// Display log data from the process in debug mode 1.
-			scanner := bufio.NewScanner(logOut)
-			scanner.Split(bufio.ScanLines)
-
-			for scanner.Scan() {
-
-				debug = fmt.Sprintf("%s log:%s", bufferType, strings.TrimSpace(scanner.Text()))
-
-				select {
-				case <-streamStatus:
-					showDebug(debug, 1)
-				default:
-					showInfo(debug)
-				}
-
-				time.Sleep(time.Duration(10) * time.Millisecond)
-
-			}
-
-		}()
-
-		f, err = bufferVFS.OpenFile(tmpFile, os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			panic(err)
-		}
-		defer f.Close()
-
-		buffer := make([]byte, 1024*4)
-
-		reader := bufio.NewReader(stdOut)
-
-		t := make(chan int)
-
-		go func() {
-
-			var timeout = 0
-			for {
-				time.Sleep(time.Duration(1000) * time.Millisecond)
-				timeout++
-
-				select {
-				case <-t:
-					return
-				default:
-					// Check if the channel is closed before sending
-					select {
-					case t <- timeout:
-					default:
-					}
-				}
-
-			}
-
-		}()
-
-		for {
-
-			select {
-			case timeout := <-t:
-				if timeout >= 20 && tmpSegment == 1 {
-					cmd.Process.Kill()
-					err = errors.New("Timeout")
-					ShowError(err, 4006)
-					killClientConnection(streamID, playlistID, false)
-					addErrorToStream(err)
-					cmd.Wait()
-					f.Close()
-					return
-				}
-
-			default:
-
-			}
-
-			if fileSize == 0 && !stream.Status {
-				showInfo("Streaming Status:Receive data from " + bufferType)
-			}
-
-			if !clientConnection(stream) {
-				cmd.Process.Kill()
-				f.Close()
-				cmd.Wait()
-				return
-			}
-
-			n, err := reader.Read(buffer)
-			if err == io.EOF {
-				break
-			}
-
-			fileSize = fileSize + len(buffer[:n])
-
-			if _, err := f.Write(buffer[:n]); err != nil {
-				cmd.Process.Kill()
-				ShowError(err, 0)
-				killClientConnection(streamID, playlistID, false)
-				addErrorToStream(err)
-				cmd.Wait()
-				return
-			}
-
-			if fileSize >= bufferSize/2 {
-
-				if tmpSegment == 1 && !stream.Status {
-					close(t)
-					close(streamStatus)
-					showInfo(fmt.Sprintf("Streaming Status:Buffering data from %s", bufferType))
-				}
-
-				f.Close()
-				tmpSegment++
-
-				if !stream.Status {
-					Lock.Lock()
-					stream.Status = true
-					playlist.Streams[streamID] = stream
-					BufferInformation.Store(playlistID, playlist)
-					Lock.Unlock()
-				}
-
-				tmpFile = fmt.Sprintf("%s%d.ts", tmpFolder, tmpSegment)
-
-				fileSize = 0
-
-				var errCreate, errOpen error
-				_, errCreate = bufferVFS.Create(tmpFile)
-				f, errOpen = bufferVFS.OpenFile(tmpFile, os.O_APPEND|os.O_WRONLY, 0600)
-				if errCreate != nil || errOpen != nil {
-					cmd.Process.Kill()
-					ShowError(err, 0)
-					killClientConnection(streamID, playlistID, false)
-					addErrorToStream(err)
-					cmd.Wait()
-					return
-				}
-
-			}
-
-		}
-
-		cmd.Process.Kill()
-		cmd.Wait()
-
-		err = errors.New(bufferType + " error")
-		addErrorToStream(err)
-		ShowError(err, 1204)
-
-		time.Sleep(time.Duration(500) * time.Millisecond)
-		clientConnection(stream)
-
-		return
-
-	}
-
-}
-
 func getTuner(id, playlistType string) (tuner int) {
 
-	var playListBuffer string
-	systemMutex.Lock()
-	playListInterface := Settings.Files.M3U[id]
-	if playListInterface == nil {
-		playListInterface = Settings.Files.HDHR[id]
-	}
-	if playListMap, ok := playListInterface.(map[string]interface{}); ok {
-		if buffer, ok := playListMap["buffer"].(string); ok {
-			playListBuffer = buffer
-		} else {
-			playListBuffer = "-"
-		}
-	}
-	systemMutex.Unlock()
+	playListBuffer, _ := getPlaylistBuffer(id)
 
 	switch playListBuffer {
 
 	case "-":
 		tuner = Settings.Tuner
 
-	case "threadfin", "ffmpeg", "vlc":
+	case "threadfin", "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe":
 
 		i, err := strconv.Atoi(getProviderParameter(id, playlistType, "tuner"))
 		if err == nil {
@@ -1510,18 +1482,4 @@ func debugResponse(resp *http.Response) {
 	showDebug(debug, debugLevel)
 
 	return
-}
-
-func terminateProcessGracefully(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		// Send a SIGTERM to the process
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			// If an error occurred while trying to send the SIGTERM, you might resort to a SIGKILL.
-			ShowError(err, 0)
-			cmd.Process.Kill()
-		}
-
-		// Optionally, you can wait for the process to finish too
-		cmd.Wait()
-	}
 }

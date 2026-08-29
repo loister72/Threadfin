@@ -113,7 +113,7 @@ func getLineup() (jsonContent []byte, err error) {
 
 			var m3uChannel M3UChannelStructXEPG
 
-			err = json.Unmarshal([]byte(mapToJSON(dsa)), &m3uChannel)
+			err = remarshalJSON(dsa, &m3uChannel)
 			if err != nil {
 				return
 			}
@@ -149,7 +149,7 @@ func getLineup() (jsonContent []byte, err error) {
 		for _, dxc := range Data.XEPG.Channels {
 
 			var xepgChannel XEPGChannelStruct
-			err = json.Unmarshal([]byte(mapToJSON(dxc)), &xepgChannel)
+			err = remarshalJSON(dxc, &xepgChannel)
 			if err != nil {
 				return
 			}

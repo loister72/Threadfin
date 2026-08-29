@@ -134,11 +134,11 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 
 	systemMutex.Lock()
 	forceHttps := Settings.ForceHttps
-    noStreamHttps := Settings.ExcludeStreamHttps
+	noStreamHttps := Settings.ExcludeStreamHttps
 	systemMutex.Unlock()
 
 	// Dont Change Source M3Us to use HTTPs when forceHttps set and Exclude Streams from https
-    if forceHttps && noStreamHttps == false {
+	if forceHttps && noStreamHttps == false {
 		u, err := url.Parse(streamInfo.URL)
 		if err == nil {
 			u.Scheme = "https"
@@ -174,36 +174,23 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var playListBuffer string
-	systemMutex.Lock()
-	playListInterface := Settings.Files.M3U[streamInfo.PlaylistID]
-	if playListInterface == nil {
-		playListInterface = Settings.Files.HDHR[streamInfo.PlaylistID]
-	}
-
-	if playListMap, ok := playListInterface.(map[string]interface{}); ok {
-		if bufferValue, exists := playListMap["buffer"]; exists && bufferValue != nil {
-			if buffer, ok := bufferValue.(string); ok {
-				playListBuffer = buffer
-			}
-		}
-	}
-	systemMutex.Unlock()
+	playListBuffer, playListBufferSource := getPlaylistBuffer(streamInfo.PlaylistID)
+	playListBufferLog := formatPlaylistBufferLog(playListBuffer, playListBufferSource)
 
 	switch playListBuffer {
 	case "-":
-		showInfo(fmt.Sprintf("Buffer:false [%s]", playListBuffer))
+		showInfo(fmt.Sprintf("Buffer:false [%s]", playListBufferLog))
 	case "threadfin":
 		if strings.Index(streamInfo.URL, "rtsp://") != -1 || strings.Index(streamInfo.URL, "rtp://") != -1 {
 			err = errors.New("RTSP and RTP streams are not supported")
 			ShowError(err, 2004)
-			showInfo("Streaming URL:" + streamInfo.URL)
+			showInfo("Streaming URL:" + redactStreamURL(streamInfo.URL))
 			http.Redirect(w, r, streamInfo.URL, 302)
 			return
 		}
-		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBuffer))
+		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBufferLog))
 	default:
-		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBuffer))
+		showInfo(fmt.Sprintf("Buffer:true [%s]", playListBufferLog))
 	}
 
 	showInfo(fmt.Sprintf("Channel Name:%s", streamInfo.Name))
@@ -211,7 +198,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 
 	switch playListBuffer {
 	case "-":
-		showInfo("Streaming URL:" + streamInfo.URL)
+		showInfo("Streaming URL:" + redactStreamURL(streamInfo.URL))
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		http.Redirect(w, r, streamInfo.URL, 302)
 		showInfo("Streaming Info:URL was passed to the client.")
@@ -225,7 +212,7 @@ func Stream(w http.ResponseWriter, r *http.Request) {
 // Auto : HDHR routing (wird derzeit nicht benutzt)
 func Auto(w http.ResponseWriter, r *http.Request) {
 	var channelID = strings.Replace(r.RequestURI, "/auto/v", "", 1)
-	fmt.Println(channelID)
+	showDebug("Auto channel: "+channelID, 1)
 	return
 }
 
@@ -466,7 +453,6 @@ func WS(w http.ResponseWriter, r *http.Request) {
 				ShowError(err, 1022)
 			} else {
 				return
-				break
 			}
 			return
 
@@ -624,7 +610,7 @@ func WS(w http.ResponseWriter, r *http.Request) {
 			response.ProbeInfo = ProbeInfoStruct{Resolution: resolution, FrameRate: frameRate, AudioChannel: audioChannels}
 
 		default:
-			fmt.Println("+ + + + + + + + + + +", request.Cmd)
+			showDebug("Unknown websocket command: "+request.Cmd, 1)
 		}
 
 		if err != nil {
@@ -955,7 +941,6 @@ func API(w http.ResponseWriter, r *http.Request) {
 
 		default:
 			token, err = tokenAuthentication(request.Token)
-			fmt.Println(err)
 			if err != nil {
 				responseAPIError(err)
 				return
@@ -986,6 +971,10 @@ func API(w http.ResponseWriter, r *http.Request) {
 		response.URLDvr = System.Domain
 		response.URLM3U = System.ServerProtocol.M3U + "://" + System.Domain + "/m3u/threadfin.m3u"
 		response.URLXepg = System.ServerProtocol.XML + "://" + System.Domain + "/xmltv/threadfin.xml"
+
+	case "guide.preflight":
+		report := BuildGuidePreflightReport(Data.XEPG.Channels, Data.XMLTV.Mapping)
+		response.GuidePreflight = &report
 
 	case "update.m3u":
 		err = getProviderData("m3u", "")

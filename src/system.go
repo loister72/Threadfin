@@ -151,7 +151,7 @@ func loadSettings() (settings SettingsStruct, err error) {
 	defaults["ssdp"] = true
 	defaults["storeBufferInRAM"] = true
 	defaults["forceHttps"] = false
-    defaults["excludeStreamHttps"] = false
+	defaults["excludeStreamHttps"] = false
 	defaults["httpsPort"] = 443
 	defaults["httpsThreadfinDomain"] = ""
 	defaults["httpThreadfinDomain"] = ""
@@ -199,6 +199,8 @@ func loadSettings() (settings SettingsStruct, err error) {
 		settings.VLCPath = searchFileInOS("cvlc")
 	}
 
+	normalizeProviderBufferSettings(&settings)
+
 	// Initialze virutal filesystem for the Buffer
 	initBufferVFS()
 
@@ -210,11 +212,12 @@ func loadSettings() (settings SettingsStruct, err error) {
 	}
 
 	// Warung wenn FFmpeg nicht gefunden wurde
-	if len(Settings.FFmpegPath) == 0 && Settings.Buffer == "ffmpeg" {
+	switch normalizePlaylistBuffer(Settings.Buffer) {
+	case "ffmpeg", "hdhr-remux", "hdhr-safe":
 		showWarning(2020)
 	}
 
-	if len(Settings.VLCPath) == 0 && Settings.Buffer == "vlc" {
+	if len(Settings.VLCPath) == 0 && normalizePlaylistBuffer(Settings.Buffer) == "vlc" {
 		showWarning(2021)
 	}
 
@@ -379,10 +382,6 @@ func getStreamInfo(urlID string) (streamInfo StreamInfo, err error) {
 
 	if s, ok := Data.Cache.StreamingURLS[urlID]; ok {
 		s.URL = strings.Trim(s.URL, "\r\n")
-		s.BackupChannel1 = s.BackupChannel1
-		s.BackupChannel2 = s.BackupChannel2
-		s.BackupChannel3 = s.BackupChannel3
-
 		streamInfo = s
 	} else {
 		err = errors.New("streaming error")

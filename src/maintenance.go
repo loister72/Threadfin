@@ -84,8 +84,6 @@ func maintenance() {
 		time.Sleep(60 * time.Second)
 
 	}
-
-	return
 }
 
 func randomTime(min, max int) int {

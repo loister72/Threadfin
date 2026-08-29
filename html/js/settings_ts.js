@@ -461,8 +461,8 @@ class SettingsCategory {
                 var tdLeft = document.createElement("TD");
                 tdLeft.innerHTML = "{{.settings.streamBuffering.title}}" + ":";
                 var tdRight = document.createElement("TD");
-                var text = ["{{.settings.streamBuffering.info_false}}", "FFmpeg: ({{.settings.streamBuffering.info_ffmpeg}})", "VLC: ({{.settings.streamBuffering.info_vlc}})"];
-                var values = ["-", "ffmpeg", "vlc"];
+                var text = ["{{.settings.streamBuffering.info_false}}", "FFmpeg: ({{.settings.streamBuffering.info_ffmpeg}})", "VLC: ({{.settings.streamBuffering.info_vlc}})", "HDHR Remux", "HDHR Safe"];
+                var values = ["-", "ffmpeg", "vlc", "hdhr-remux", "hdhr-safe"];
                 var select = content.createSelect(text, values, data, settingsKey);
                 select.setAttribute("onchange", "javascript: this.className = 'changed'");
                 tdRight.appendChild(select);
